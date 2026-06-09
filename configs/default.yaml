@@ -1,0 +1,33 @@
+project:
+  name: ai_gen_image_detector
+seed: 42
+labels:
+  real: 0
+  fake: 1
+paths:
+  data_root: data
+  manifest_dir: outputs/manifests
+  cache_dir: outputs/cache
+  experiment_dir: outputs/experiments
+  model_dir: outputs/models
+features:
+  image_size: 224
+  clip:
+    enabled: true
+    model_id: hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K
+    model_name: ViT-B-32
+    pretrained: laion2b_s34b_b79k
+    batch_size: 32
+    cache_subdir: clip
+  frequency:
+    enabled: true
+    image_size: 224
+    grayscale: true
+    radial_bins: 64
+    cache_subdir: frequency
+classifier:
+  name: logistic_regression
+  params:
+    max_iter: 1000
+    random_state: 42
+mode: fusion

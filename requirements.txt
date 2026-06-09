@@ -1,0 +1,12 @@
+numpy
+pandas
+pillow
+scipy
+scikit-learn
+torch
+open_clip_torch
+pyyaml
+joblib
+matplotlib
+streamlit
+pytest

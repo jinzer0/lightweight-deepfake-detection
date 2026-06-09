@@ -1,0 +1,19 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Generated data, caches, and experiment outputs
+data/
+outputs/**
+!outputs/
+!outputs/.gitkeep
+*.pt
+*.pth
+*.ckpt
+
+
+.playwright-mcp/
+.sisyphus/

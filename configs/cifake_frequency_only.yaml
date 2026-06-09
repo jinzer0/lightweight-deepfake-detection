@@ -1,0 +1,14 @@
+inherits: default.yaml
+dataset:
+  name: cifake
+mode: frequency_only
+features:
+  clip:
+    enabled: false
+  frequency:
+    enabled: true
+classifier:
+  name: logistic_regression
+  params:
+    max_iter: 1000
+    random_state: 42
