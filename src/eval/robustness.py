@@ -1,112 +1,146 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownArgumentType=false, reportAny=false, reportExplicitAny=false, reportArgumentType=false, reportUnusedCallResult=false, reportUnreachable=false
+# pyright: reportAny=false, reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportExplicitAny=false, reportUnusedCallResult=false
 
+import argparse
 import csv
 import io
-import json
-import shutil
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast, override
 
-import joblib
-import matplotlib
-
-matplotlib.use("Agg")
-
-import matplotlib.pyplot as plt
 import numpy as np
-import yaml
+import torch
 from PIL import Image, ImageFilter
-from sklearn.metrics import accuracy_score, average_precision_score, precision_recall_fscore_support, roc_auc_score
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
 
-from src.data.manifest import read_manifest, validate_manifest_rows
-from src.features.cache import build_metadata, create_feature_cache, hash_manifest_file, write_feature_cache
-from src.features.frequency import (
-    DCT_BACKEND,
-    DCT_POLICY,
-    DEFAULT_FFT_EPSILON,
-    DEFAULT_RADIAL_BINS,
-    FEATURE_DTYPE,
-    FrequencyFeatureConfig,
-    extract_frequency_feature_batch,
-)
-from src.utils.image_io import DEFAULT_FREQUENCY_IMAGE_SIZE, load_rgb_image
+from src.data.dataset import ALLOWED_SPLITS
+from src.data.transforms import get_eval_transform
+from src.data.validate_metadata import MetadataValidationError, read_metadata, validate_metadata
+from src.eval.evaluate import MODEL_SPECS
+from src.eval.metrics import compute_binary_metrics
+from src.features.clip_features import ClipModelLoadError, extract_clip_features, load_clip_model
+from src.features.frequency_features import FEATURE_DTYPE, extract_frequency_feature
+from src.models.checkpoint import CheckpointError, load_checkpoint
+from src.models.fusion_classifier import FusionClassifier
+from src.models.mlp_classifier import MLPClassifier
+from src.utils.config import load_config, resolve_device
+from src.utils.image_io import load_rgb_image
 
-RobustnessMode = Literal["quick", "full"]
 
-ROBUSTNESS_COLUMNS = [
-    "mode",
-    "corruption_type",
-    "corruption_level",
-    "sample_count",
-    "clean_accuracy",
-    "corrupted_accuracy",
-    "accuracy_degradation",
-    "clean_f1_fake",
-    "corrupted_f1_fake",
-    "f1_fake_degradation",
-    "clean_roc_auc",
-    "corrupted_roc_auc",
-    "roc_auc_degradation",
-    "clean_average_precision",
-    "corrupted_average_precision",
-    "average_precision_degradation",
-    "ranking_metric_input",
-    "base_sample_ids",
-    "corrupted_cache_path",
-    "manifest_path",
-    "experiment_dir",
-    "model_path",
-    "scaler_path",
-]
+ModelName = Literal["clip_only", "frequency_only", "fusion"]
+
+ROBUSTNESS_COLUMNS = ["model_name", "corruption", "severity", "accuracy", "precision", "recall", "f1", "roc_auc"]
+
+
+class RobustnessError(ValueError):
+    pass
+
+
+@dataclass(frozen=True)
+class CorruptionSpec:
+    corruption: str
+    severity: str
 
 
 @dataclass(frozen=True)
 class RobustnessResult:
-    output_dir: Path
     metrics_path: Path
-    summary_path: Path
-    rows: list[dict[str, Any]]
+    rows: list[dict[str, object]]
 
 
-def robustness_levels(mode: RobustnessMode) -> list[tuple[str, str]]:
-    if mode == "quick":
-        return [("jpeg", "quality_75"), ("resize", "down_160"), ("blur", "sigma_1.0")]
-    if mode == "full":
-        return [
-            ("jpeg", "quality_95"),
-            ("jpeg", "quality_75"),
-            ("jpeg", "quality_50"),
-            ("jpeg", "quality_30"),
-            ("resize", "down_160"),
-            ("resize", "down_128"),
-            ("blur", "sigma_0.5"),
-            ("blur", "sigma_1.0"),
-            ("blur", "sigma_2.0"),
-        ]
-    raise ValueError(f"unsupported robustness mode: {mode}")
+class _InMemoryImageDataset(Dataset[tuple[torch.Tensor, int, dict[str, str]]]):
+    def __init__(self, images: Sequence[Image.Image], labels: Sequence[int], rows: Sequence[Mapping[str, str]], image_size: int) -> None:
+        if len(images) != len(labels) or len(images) != len(rows):
+            raise RobustnessError("corrupted image, label, and metadata row counts must match")
+        self.images: list[Image.Image] = list(images)
+        self.labels: list[int] = [int(label) for label in labels]
+        self.rows: list[dict[str, str]] = [dict(row) for row in rows]
+        self.transform: Any = get_eval_transform(image_size)
+
+    def __len__(self) -> int:
+        return len(self.images)
+
+    @override
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, int, dict[str, str]]:
+        return self.transform(self.images[index]), self.labels[index], self.rows[index]
 
 
-def apply_corruption(image: Image.Image, corruption_type: str, corruption_level: str) -> Image.Image:
+def default_corruptions(config: Mapping[str, object]) -> list[CorruptionSpec]:
+    robustness = config.get("robustness")
+    settings = robustness if isinstance(robustness, Mapping) else {}
+    jpeg_qualities = settings.get("jpeg_qualities", [95, 75, 50])
+    resize_scales = settings.get("resize_scales", [0.5])
+    blur_sigmas = settings.get("blur_sigmas", [1.0, 2.0])
+
+    specs: list[CorruptionSpec] = []
+    specs.extend(CorruptionSpec("jpeg", str(int(quality))) for quality in cast(Sequence[Any], jpeg_qualities))
+    specs.extend(CorruptionSpec("resize", _severity_text(float(scale))) for scale in cast(Sequence[Any], resize_scales))
+    specs.extend(CorruptionSpec("blur", _severity_text(float(sigma))) for sigma in cast(Sequence[Any], blur_sigmas))
+    return specs
+
+
+def apply_corruption(image: Image.Image, corruption: str, severity: str) -> Image.Image:
     rgb_image = image.convert("RGB")
-    if corruption_type == "jpeg":
-        quality = int(corruption_level.removeprefix("quality_"))
+    if corruption == "jpeg":
+        quality = _severity_int(severity, prefix="quality_")
         buffer = io.BytesIO()
-        _ = rgb_image.save(buffer, format="JPEG", quality=quality)
+        rgb_image.save(buffer, format="JPEG", quality=quality)
         buffer.seek(0)
         with Image.open(buffer) as compressed:
-            _ = compressed.load()
+            compressed.load()
             return compressed.convert("RGB")
-    if corruption_type == "resize":
-        size = int(corruption_level.removeprefix("down_"))
-        down = rgb_image.resize((size, size), resample=Image.Resampling.BICUBIC)
-        return down.resize((DEFAULT_FREQUENCY_IMAGE_SIZE, DEFAULT_FREQUENCY_IMAGE_SIZE), resample=Image.Resampling.BICUBIC)
-    if corruption_type == "blur":
-        sigma = float(corruption_level.removeprefix("sigma_"))
+    if corruption == "resize":
+        scale = _resize_scale(severity)
+        width, height = rgb_image.size
+        down_size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
+        down = rgb_image.resize(down_size, resample=Image.Resampling.BICUBIC)
+        return down.resize((width, height), resample=Image.Resampling.BICUBIC)
+    if corruption == "blur":
+        sigma = _severity_float(severity, prefix="sigma_")
         return rgb_image.filter(ImageFilter.GaussianBlur(radius=sigma))
-    raise ValueError(f"unsupported corruption_type: {corruption_type}")
+    raise RobustnessError(f"unsupported corruption: {corruption}")
+
+
+def evaluate_robustness(config: Mapping[str, object], *, model_name: ModelName, split: str) -> RobustnessResult:
+    if model_name not in MODEL_SPECS:
+        raise RobustnessError(f"model must be one of {sorted(MODEL_SPECS)}, got {model_name!r}")
+    if split not in ALLOWED_SPLITS:
+        raise RobustnessError(f"split must be one of {', '.join(ALLOWED_SPLITS)}, got {split!r}")
+
+    rows = _load_split_rows(config, split=split)
+    labels = np.asarray([int(row["label"]) for row in rows], dtype=np.int64)
+    checkpoint = _load_model_checkpoint(config, model_name=model_name)
+    threshold = _checkpoint_float(checkpoint["threshold"], "threshold")
+    device = torch.device(resolve_device(dict(config)))
+
+    result_rows: list[dict[str, object]] = []
+    for spec in default_corruptions(config):
+        corrupted_images = [_corrupted_row_image(row, spec) for row in rows]
+        table = _extract_corrupted_features(config, model_name=model_name, rows=rows, labels=labels, images=corrupted_images, device=device)
+        model = _build_model(checkpoint, model_name=model_name, features=table.features, clip_dim=table.clip_dim, frequency_dim=table.frequency_dim)
+        probabilities = _predict_probabilities(model, table.features, device=device)
+        metrics = compute_binary_metrics(labels, probabilities, threshold=threshold)
+        result_rows.append(
+            {
+                "model_name": model_name,
+                "corruption": spec.corruption,
+                "severity": spec.severity,
+                "accuracy": metrics["accuracy"],
+                "precision": metrics["precision"],
+                "recall": metrics["recall"],
+                "f1": metrics["f1"],
+                "roc_auc": metrics["roc_auc"],
+            }
+        )
+
+    report_dir = _report_dir(config)
+    report_dir.mkdir(parents=True, exist_ok=True)
+    metrics_path = report_dir / f"{model_name}_robustness_metrics.csv"
+    _write_metrics_csv(metrics_path, result_rows)
+    return RobustnessResult(metrics_path=metrics_path, rows=result_rows)
 
 
 def run_frequency_robustness(
@@ -114,291 +148,150 @@ def run_frequency_robustness(
     manifest_path: str | Path,
     experiment_dir: str | Path,
     output_dir: str | Path | None = None,
-    mode: RobustnessMode = "quick",
+    mode: str = "quick",
     max_samples: int | None = None,
 ) -> RobustnessResult:
-    manifest = Path(manifest_path)
-    experiment = Path(experiment_dir)
-    config = _read_yaml(experiment / "config.yaml")
-    _require_frequency_artifact(config)
-
-    rows = read_manifest(manifest)
-    validate_manifest_rows(rows, strict=True)
-    test_rows = [row for row in rows if row.get("split") == "test"]
-    if not test_rows:
-        raise ValueError("robustness requires at least one test row")
-    if mode == "quick":
-        test_rows = _tiny_balanced_subset(test_rows, max_samples or 4)
-    elif max_samples is not None:
-        test_rows = test_rows[: int(max_samples)]
-    if not test_rows:
-        raise ValueError("robustness selected no test rows")
-
-    resolved_output = Path(output_dir) if output_dir is not None else Path("outputs") / "robustness" / experiment.name
-    resolved_output.mkdir(parents=True, exist_ok=True)
-    corruption_dir = resolved_output / "corrupted_images"
-    cache_dir = resolved_output / "feature_caches"
-    if corruption_dir.exists():
-        shutil.rmtree(corruption_dir)
-    corruption_dir.mkdir(parents=True, exist_ok=True)
-    if cache_dir.exists():
-        shutil.rmtree(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-
-    model_path = experiment / "model.joblib"
-    scaler_path = experiment / "scaler.joblib"
-    model = joblib.load(model_path)
-    transformers = joblib.load(scaler_path)
-    scaler = transformers.get("frequency_scaler") if isinstance(transformers, dict) else None
-    if scaler is None:
-        raise ValueError("scaler.joblib must contain frequency_scaler for frequency robustness")
-
-    threshold = float(config.get("threshold", 0.5))
-    clean_features = _scale_frequency_features(_extract_raw_frequency(test_rows), scaler)
-    labels = np.asarray([int(row["label"]) for row in test_rows], dtype=np.int64)
-    clean_prediction = _predict(model, clean_features, threshold=threshold)
-    clean_metrics = _metrics(labels, clean_prediction)
-
-    result_rows: list[dict[str, Any]] = []
-    base_sample_ids = [str(row.get("base_sample_id") or row.get("sample_id")) for row in test_rows]
-    clean_manifest_hash = hash_manifest_file(manifest)
-    for corruption_type, corruption_level in robustness_levels(mode):
-        corrupted_paths = _write_corrupted_images(test_rows, corruption_dir, corruption_type, corruption_level)
-        corrupted_rows = [dict(row, root="", rel_path=path.as_posix()) for row, path in zip(test_rows, corrupted_paths, strict=True)]
-        raw_corrupted_features = _extract_raw_frequency(corrupted_rows)
-        corrupted_cache_path = _write_corrupted_frequency_cache(
-            corrupted_rows,
-            raw_corrupted_features,
-            cache_dir=cache_dir,
-            base_sample_ids=base_sample_ids,
-            corruption_type=corruption_type,
-            corruption_level=corruption_level,
-            clean_manifest_hash=clean_manifest_hash,
-            seed=int(config.get("seed", 42)),
-        )
-        scaled_corrupted_features = _scale_frequency_features(raw_corrupted_features, scaler)
-        corrupted_prediction = _predict(model, scaled_corrupted_features, threshold=threshold)
-        corrupted_metrics = _metrics(labels, corrupted_prediction)
-        result_rows.append(
-            _result_row(
-                mode=mode,
-                corruption_type=corruption_type,
-                corruption_level=corruption_level,
-                sample_count=len(test_rows),
-                clean_metrics=clean_metrics,
-                corrupted_metrics=corrupted_metrics,
-                base_sample_ids=base_sample_ids,
-                corrupted_cache_path=corrupted_cache_path,
-                manifest_path=manifest,
-                experiment_dir=experiment,
-                model_path=model_path,
-                scaler_path=scaler_path,
-            )
-        )
-
-    metrics_path = resolved_output / "robustness_metrics.csv"
-    summary_path = resolved_output / "robustness_summary.png"
-    _write_metrics_csv(metrics_path, result_rows)
-    _write_summary_plot(summary_path, result_rows)
-    return RobustnessResult(resolved_output, metrics_path, summary_path, result_rows)
-
-
-def _require_frequency_artifact(config: dict[str, Any]) -> None:
-    mode = str(config.get("mode", ""))
-    if mode != "frequency_only":
-        raise ValueError(f"robustness currently supports frequency_only artifacts only; got mode={mode!r}")
-    classifier_key = str(config.get("classifier", {}).get("key", ""))
-    if classifier_key not in {"logistic_regression", "linear_svm"}:
-        raise ValueError(f"unsupported classifier for robustness: {classifier_key!r}")
-
-
-def _tiny_balanced_subset(rows: list[dict[str, str]], limit: int) -> list[dict[str, str]]:
-    selected: list[dict[str, str]] = []
-    for label in ["0", "1"]:
-        selected.extend(row for row in rows if row.get("label") == label)
-    unique: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for row in selected + rows:
-        sample_id = str(row.get("sample_id", ""))
-        if sample_id not in seen:
-            unique.append(row)
-            seen.add(sample_id)
-        if len(unique) >= int(limit):
-            break
-    return unique
-
-
-def _extract_raw_frequency(rows: list[dict[str, str]]) -> np.ndarray:
-    paths = [_absolute_image_path(row) for row in rows]
-    config = FrequencyFeatureConfig()
-    features = extract_frequency_feature_batch(
-        paths,
-        image_size=config.image_size,
-        radial_bins=config.radial_bins,
-        fft_epsilon=config.fft_epsilon,
-    )
-    raw_features = np.asarray(features, dtype=FEATURE_DTYPE)
-    if raw_features.ndim != 2 or not np.isfinite(raw_features).all():
-        raise ValueError("raw frequency features must be finite 2D array")
-    return raw_features
-
-
-def _scale_frequency_features(raw_features: np.ndarray, scaler: Any) -> np.ndarray:
-    transformed = scaler.transform(raw_features)
-    features = np.asarray(transformed, dtype=np.float32)
-    if features.ndim != 2 or not np.isfinite(features).all():
-        raise ValueError("scaled frequency features must be finite 2D array")
-    return features
-
-
-def _write_corrupted_frequency_cache(
-    rows: list[dict[str, str]],
-    features: np.ndarray,
-    *,
-    cache_dir: Path,
-    base_sample_ids: list[str],
-    corruption_type: str,
-    corruption_level: str,
-    clean_manifest_hash: str,
-    seed: int,
-) -> Path:
-    feature_config = FrequencyFeatureConfig().as_dict()
-    metadata = build_metadata(
-        feature_dim=int(features.shape[1]),
-        dtype=str(np.dtype(FEATURE_DTYPE).name),
-        normalization="raw_unscaled",
-        seed=int(seed),
-        extra={
-            "image_size": DEFAULT_FREQUENCY_IMAGE_SIZE,
-            "radial_bins": DEFAULT_RADIAL_BINS,
-            "fft_epsilon": DEFAULT_FFT_EPSILON,
-            "dct_policy": DCT_POLICY,
-            "dct_backend": DCT_BACKEND,
-            "is_corrupted": True,
-            "base_sample_ids": list(base_sample_ids),
-            "corruption_type": corruption_type,
-            "corruption_level": corruption_level,
-            "clean_manifest_hash": clean_manifest_hash,
+    del experiment_dir, mode, max_samples
+    config: dict[str, object] = {
+        "project": {"device": "cpu"},
+        "paths": {
+            "dataset_csv": str(manifest_path),
+            "checkpoint_dir": "artifacts/checkpoints",
+            "report_dir": str(output_dir or Path("artifacts") / "reports"),
         },
-    )
-    cache = create_feature_cache(
-        manifest_rows=rows,
-        feature_type="frequency",
-        feature_config=feature_config,
-        features=features,
-        metadata=metadata,
-    )
-    cache_path = cache_dir / f"frequency_{corruption_type}_{corruption_level}.pt"
-    write_feature_cache(cache, cache_path)
-    return cache_path
-
-
-def _absolute_image_path(row: dict[str, str]) -> Path:
-    rel_path = Path(str(row["rel_path"]))
-    if rel_path.is_absolute():
-        return rel_path
-    root = str(row.get("root", ""))
-    return Path(root) / rel_path if root else rel_path
-
-
-def _write_corrupted_images(
-    rows: list[dict[str, str]], output_root: Path, corruption_type: str, corruption_level: str
-) -> list[Path]:
-    level_dir = output_root / corruption_type / corruption_level
-    level_dir.mkdir(parents=True, exist_ok=True)
-    paths: list[Path] = []
-    for index, row in enumerate(rows):
-        image = load_rgb_image(_absolute_image_path(row))
-        corrupted = apply_corruption(image, corruption_type, corruption_level)
-        output_path = level_dir / f"{index:05d}_{row['sample_id']}.png"
-        corrupted.save(output_path, format="PNG")
-        paths.append(output_path)
-    return paths
-
-
-def _predict(model: Any, features: np.ndarray, *, threshold: float) -> dict[str, np.ndarray | str]:
-    if hasattr(model, "predict_proba"):
-        probabilities = np.asarray(model.predict_proba(features), dtype=np.float64)
-        classes = np.asarray(model.classes_, dtype=np.int64)
-        matching = np.flatnonzero(classes == 1)
-        if matching.size != 1:
-            raise ValueError(f"model classes must contain label 1 exactly once, got {classes.tolist()}")
-        prob_fake = probabilities[:, int(matching[0])]
-        pred_label = (prob_fake >= float(threshold)).astype(np.int64)
-        return {"pred_label": pred_label, "ranking": prob_fake, "ranking_metric_input": "prob_fake"}
-    decision = np.asarray(model.decision_function(features), dtype=np.float64)
-    classes = np.asarray(model.classes_, dtype=np.int64)
-    if decision.ndim != 1:
-        matching = np.flatnonzero(classes == 1)
-        if matching.size != 1:
-            raise ValueError(f"model classes must contain label 1 exactly once, got {classes.tolist()}")
-        score = decision[:, int(matching[0])]
-    else:
-        score = decision if int(classes[1]) == 1 else -decision
-    return {"pred_label": (score >= 0.0).astype(np.int64), "ranking": score, "ranking_metric_input": "decision_score"}
-
-
-def _metrics(labels: np.ndarray, prediction: dict[str, np.ndarray | str]) -> dict[str, Any]:
-    pred_label = np.asarray(prediction["pred_label"], dtype=np.int64)
-    ranking = np.asarray(prediction["ranking"], dtype=np.float64)
-    precision, recall, f1, _ = precision_recall_fscore_support(
-        labels, pred_label, labels=[0, 1], average="binary", pos_label=1, zero_division=0
-    )
-    metrics: dict[str, Any] = {
-        "accuracy": float(accuracy_score(labels, pred_label)),
-        "precision_fake": float(precision),
-        "recall_fake": float(recall),
-        "f1_fake": float(f1),
-        "ranking_metric_input": str(prediction["ranking_metric_input"]),
+        "frequency": {"method": "dct", "image_size": 224, "radial_bins": 64, "log_scale": True, "normalize_feature": True},
+        "robustness": {"jpeg_qualities": [75], "resize_scales": [0.5], "blur_sigmas": [1.0]},
     }
-    if set(np.unique(labels).astype(int).tolist()) == {0, 1}:
-        metrics["roc_auc"] = float(roc_auc_score(labels, ranking))
-        metrics["average_precision"] = float(average_precision_score(labels, ranking))
-    else:
-        metrics["roc_auc"] = None
-        metrics["average_precision"] = None
-    return metrics
+    return evaluate_robustness(config, model_name="frequency_only", split="test")
 
 
-def _result_row(
+@dataclass(frozen=True)
+class _FeatureTable:
+    features: np.ndarray
+    clip_dim: int | None = None
+    frequency_dim: int | None = None
+
+
+def _load_split_rows(config: Mapping[str, object], *, split: str) -> list[dict[str, str]]:
+    dataset_csv = _dataset_csv(config)
+    try:
+        validate_metadata(dataset_csv, strict=True)
+    except MetadataValidationError as exc:
+        raise RobustnessError(f"Invalid dataset.csv for robustness: {exc}") from exc
+    rows = [row for row in read_metadata(dataset_csv) if row.get("split") == split]
+    if not rows:
+        raise RobustnessError(f"dataset.csv has no rows for split={split!r}")
+    return rows
+
+
+def _corrupted_row_image(row: Mapping[str, str], spec: CorruptionSpec) -> Image.Image:
+    image = load_rgb_image(row["filepath"])
+    return apply_corruption(image, spec.corruption, spec.severity)
+
+
+def _extract_corrupted_features(
+    config: Mapping[str, object],
     *,
-    mode: str,
-    corruption_type: str,
-    corruption_level: str,
-    sample_count: int,
-    clean_metrics: dict[str, Any],
-    corrupted_metrics: dict[str, Any],
-    base_sample_ids: list[str],
-    corrupted_cache_path: Path,
-    manifest_path: Path,
-    experiment_dir: Path,
-    model_path: Path,
-    scaler_path: Path,
-) -> dict[str, Any]:
-    row: dict[str, Any] = {
-        "mode": mode,
-        "corruption_type": corruption_type,
-        "corruption_level": corruption_level,
-        "sample_count": int(sample_count),
-        "ranking_metric_input": clean_metrics["ranking_metric_input"],
-        "base_sample_ids": json.dumps(base_sample_ids),
-        "corrupted_cache_path": corrupted_cache_path.as_posix(),
-        "manifest_path": manifest_path.as_posix(),
-        "experiment_dir": experiment_dir.as_posix(),
-        "model_path": model_path.as_posix(),
-        "scaler_path": scaler_path.as_posix(),
-    }
-    for metric_name in ["accuracy", "f1_fake", "roc_auc", "average_precision"]:
-        clean_value = clean_metrics.get(metric_name)
-        corrupted_value = corrupted_metrics.get(metric_name)
-        prefix = "f1_fake" if metric_name == "f1_fake" else metric_name
-        row[f"clean_{prefix}"] = clean_value
-        row[f"corrupted_{prefix}"] = corrupted_value
-        row[f"{prefix}_degradation"] = None if clean_value is None or corrupted_value is None else float(clean_value) - float(corrupted_value)
-    return row
+    model_name: ModelName,
+    rows: Sequence[Mapping[str, str]],
+    labels: np.ndarray,
+    images: Sequence[Image.Image],
+    device: torch.device,
+) -> _FeatureTable:
+    frequency_features: np.ndarray | None = None
+    clip_features: np.ndarray | None = None
+    if model_name in {"frequency_only", "fusion"}:
+        frequency_features = _extract_frequency_features(config, images)
+    if model_name in {"clip_only", "fusion"}:
+        clip_features = _extract_clip_feature_table(config, rows=rows, labels=labels, images=images, device=device)
+    if model_name == "frequency_only":
+        assert frequency_features is not None
+        return _FeatureTable(features=frequency_features, frequency_dim=int(frequency_features.shape[1]))
+    if model_name == "clip_only":
+        assert clip_features is not None
+        return _FeatureTable(features=clip_features, clip_dim=int(clip_features.shape[1]))
+    if frequency_features is None or clip_features is None:
+        raise RobustnessError("fusion robustness requires both CLIP and frequency features")
+    features = np.concatenate([clip_features, frequency_features], axis=1).astype(np.float32, copy=False)
+    return _FeatureTable(features=features, clip_dim=int(clip_features.shape[1]), frequency_dim=int(frequency_features.shape[1]))
 
 
-def _write_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+def _extract_frequency_features(config: Mapping[str, object], images: Sequence[Image.Image]) -> np.ndarray:
+    features = [extract_frequency_feature(image, config) for image in images]
+    if not features:
+        raise RobustnessError("frequency robustness selected no images")
+    array = np.stack(features, axis=0).astype(FEATURE_DTYPE, copy=False)
+    if array.ndim != 2 or not np.isfinite(array).all():
+        raise RobustnessError(f"frequency features must be finite 2D array, got shape {array.shape}")
+    return array.astype(np.float32, copy=False)
+
+
+def _extract_clip_feature_table(
+    config: Mapping[str, object], *, rows: Sequence[Mapping[str, str]], labels: np.ndarray, images: Sequence[Image.Image], device: torch.device
+) -> np.ndarray:
+    try:
+        model = load_clip_model(config, device=device)
+    except ClipModelLoadError:
+        raise
+    except Exception as exc:
+        raise ClipModelLoadError(f"Failed optional CLIP robustness feature extraction: {exc}") from exc
+    dataset = _InMemoryImageDataset(images, labels.tolist(), rows, _image_size(config))
+    dataloader = DataLoader(dataset, batch_size=_batch_size(config), shuffle=False, num_workers=0)
+    features, extracted_labels, _meta = extract_clip_features(model, dataloader, device=device, normalize=_clip_normalize(config))
+    if not np.array_equal(extracted_labels.astype(np.int64, copy=False), labels):
+        raise RobustnessError("CLIP robustness labels do not match dataset.csv labels")
+    if features.ndim != 2 or not np.isfinite(features).all():
+        raise RobustnessError(f"CLIP features must be finite 2D array, got shape {features.shape}")
+    return features.astype(np.float32, copy=False)
+
+
+def _load_model_checkpoint(config: Mapping[str, object], *, model_name: ModelName) -> dict[str, object]:
+    spec = MODEL_SPECS[model_name]
+    checkpoint_path = _checkpoint_dir(config) / str(spec["checkpoint"])
+    if not checkpoint_path.is_file():
+        raise RobustnessError(f"Missing checkpoint file: {checkpoint_path}")
+    return load_checkpoint(checkpoint_path, expected_feature_type=str(spec["feature_type"]))
+
+
+def _build_model(
+    checkpoint: Mapping[str, object], *, model_name: ModelName, features: np.ndarray, clip_dim: int | None, frequency_dim: int | None
+) -> nn.Module:
+    input_dim = _checkpoint_int(checkpoint["input_dim"], "input_dim")
+    hidden_dim = _checkpoint_int(checkpoint["hidden_dim"], "hidden_dim")
+    if input_dim != int(features.shape[1]):
+        raise CheckpointError(f"checkpoint input_dim {input_dim} does not match robustness feature dimension {features.shape[1]}")
+    checkpoint_model_name = str(checkpoint["model_name"])
+    if model_name == "fusion":
+        if checkpoint_model_name != "FusionClassifier":
+            raise CheckpointError(f"fusion checkpoint model_name must be FusionClassifier, got {checkpoint_model_name!r}")
+        if clip_dim is None or frequency_dim is None:
+            raise CheckpointError("fusion robustness requires CLIP and frequency feature dimensions")
+        model: nn.Module = FusionClassifier(clip_dim=clip_dim, freq_dim=frequency_dim, hidden_dim=hidden_dim, dropout=0.0)
+    else:
+        if checkpoint_model_name != "MLPClassifier":
+            raise CheckpointError(f"{model_name} checkpoint model_name must be MLPClassifier, got {checkpoint_model_name!r}")
+        model = MLPClassifier(input_dim=input_dim, hidden_dim=hidden_dim, dropout=0.0)
+    state = cast(Mapping[str, torch.Tensor], checkpoint["model_state_dict"])
+    model.load_state_dict(state)
+    model.eval()
+    return model
+
+
+def _predict_probabilities(model: nn.Module, features: np.ndarray, *, device: torch.device) -> np.ndarray:
+    feature_tensor = torch.from_numpy(features.astype(np.float32, copy=False)).to(device)
+    model.to(device)
+    model.eval()
+    with torch.no_grad():
+        logits = model(feature_tensor)
+        probabilities = torch.sigmoid(logits).detach().cpu().numpy().astype(np.float64, copy=False)
+    if probabilities.ndim != 1 or int(probabilities.shape[0]) != int(features.shape[0]):
+        raise RobustnessError(f"model must return one fake-probability per row, got shape {probabilities.shape}")
+    if not np.isfinite(probabilities).all() or np.any((probabilities < 0.0) | (probabilities > 1.0)):
+        raise RobustnessError("model produced invalid fake probabilities")
+    return probabilities
+
+
+def _write_metrics_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as file_obj:
         writer = csv.DictWriter(file_obj, fieldnames=ROBUSTNESS_COLUMNS)
         writer.writeheader()
@@ -406,35 +299,109 @@ def _write_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
             writer.writerow({column: _csv_value(row.get(column)) for column in ROBUSTNESS_COLUMNS})
 
 
-def _write_summary_plot(path: Path, rows: list[dict[str, Any]]) -> None:
-    labels = [f"{row['corruption_type']}\n{row['corruption_level']}" for row in rows]
-    accuracy = [float(row["accuracy_degradation"] or 0.0) for row in rows]
-    f1_values = [float(row["f1_fake_degradation"] or 0.0) for row in rows]
-    x_values = np.arange(len(rows))
-    width = 0.35
-    fig, axis = plt.subplots(figsize=(max(6, len(rows) * 1.1), 4))
-    _ = axis.bar(x_values - width / 2, accuracy, width, label="Accuracy degradation")
-    _ = axis.bar(x_values + width / 2, f1_values, width, label="F1(fake) degradation")
-    _ = axis.set_ylabel("Clean - corrupted")
-    _ = axis.set_title("Robustness degradation by corruption")
-    _ = axis.set_xticks(x_values, labels, rotation=30, ha="right")
-    _ = axis.legend()
-    fig.tight_layout()
-    fig.savefig(path, dpi=150)
-    plt.close(fig)
+def _dataset_csv(config: Mapping[str, object]) -> Path:
+    paths = _paths(config)
+    if "dataset_csv" not in paths:
+        raise RobustnessError("config.paths missing required key 'dataset_csv'")
+    return Path(str(paths["dataset_csv"]))
 
 
-def _read_yaml(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as file_obj:
-        data = yaml.safe_load(file_obj)
-    if not isinstance(data, dict):
-        raise ValueError(f"expected YAML object at {path}")
-    return data
+def _checkpoint_dir(config: Mapping[str, object]) -> Path:
+    return Path(str(_paths(config).get("checkpoint_dir", "artifacts/checkpoints")))
 
 
-def _csv_value(value: Any) -> str:
+def _report_dir(config: Mapping[str, object]) -> Path:
+    return Path(str(_paths(config).get("report_dir", "artifacts/reports")))
+
+
+def _paths(config: Mapping[str, object]) -> Mapping[str, object]:
+    paths = config.get("paths")
+    if not isinstance(paths, Mapping):
+        raise RobustnessError("config.paths must be a mapping")
+    return paths
+
+
+def _image_size(config: Mapping[str, object]) -> int:
+    data = config.get("data")
+    if isinstance(data, Mapping) and "image_size" in data:
+        return int(cast(Any, data["image_size"]))
+    return 224
+
+
+def _batch_size(config: Mapping[str, object]) -> int:
+    data = config.get("data")
+    if isinstance(data, Mapping) and "batch_size" in data:
+        return int(cast(Any, data["batch_size"]))
+    return 32
+
+
+def _clip_normalize(config: Mapping[str, object]) -> bool:
+    clip = config.get("clip")
+    if isinstance(clip, Mapping):
+        return bool(clip.get("normalize_feature", True))
+    return True
+
+
+def _checkpoint_int(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise CheckpointError(f"checkpoint {name} must be an int")
+    return value
+
+
+def _checkpoint_float(value: object, name: str) -> float:
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise CheckpointError(f"checkpoint {name} must be numeric")
+    return float(value)
+
+
+def _severity_text(value: float) -> str:
+    return str(float(value))
+
+
+def _severity_int(severity: str, *, prefix: str) -> int:
+    text = severity.removeprefix(prefix)
+    return int(float(text))
+
+
+def _severity_float(severity: str, *, prefix: str) -> float:
+    return float(severity.removeprefix(prefix))
+
+
+def _resize_scale(severity: str) -> float:
+    if severity.startswith("down_"):
+        pixels = float(severity.removeprefix("down_"))
+        return pixels / 224.0
+    return _severity_float(severity, prefix="scale_") if severity.startswith("scale_") else float(severity)
+
+
+def _csv_value(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, float):
         return f"{value:.17g}"
     return str(value)
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate checkpoint robustness on corrupted dataset.csv images.")
+    parser.add_argument("--config", required=True, help="Path to project YAML config")
+    parser.add_argument("--model", required=True, choices=sorted(MODEL_SPECS), help="Model checkpoint to evaluate")
+    parser.add_argument("--split", default="test", choices=ALLOWED_SPLITS, help="dataset.csv split to evaluate")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = _parse_args()
+    config = load_config(args.config)
+    try:
+        result = evaluate_robustness(config, model_name=cast(ModelName, args.model), split=str(args.split))
+    except (RobustnessError, CheckpointError, ClipModelLoadError, FileNotFoundError, ValueError) as exc:
+        raise SystemExit(f"Robustness evaluation failed clearly: {exc}") from None
+    print(f"model_name={args.model}")
+    print(f"split={args.split}")
+    print(f"corruptions={len(result.rows)}")
+    print(f"saved metrics: {result.metrics_path}")
+
+
+if __name__ == "__main__":
+    main()
