@@ -1,0 +1,7 @@
+image_id,filepath,label,class_name,dataset,generator,split,width,height,ext
+cifake_real_000001,data/raw/cifake/real/000001.png,0,real,CIFAKE,real_camera,train,32,32,png
+cifake_real_000002,data/raw/cifake/real/000002.png,0,real,CIFAKE,real_camera,val,32,32,png
+cifake_real_000003,data/raw/cifake/real/000003.png,0,real,CIFAKE,real_camera,test,32,32,png
+cifake_fake_000001,data/raw/cifake/fake/000001.png,1,fake,CIFAKE,cifake_diffusion,train,32,32,png
+cifake_fake_000002,data/raw/cifake/fake/000002.png,1,fake,CIFAKE,cifake_diffusion,val,32,32,png
+cifake_fake_000003,data/raw/cifake/fake/000003.png,1,fake,CIFAKE,cifake_diffusion,test,32,32,png
