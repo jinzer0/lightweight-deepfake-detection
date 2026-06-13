@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportAny=false, reportExplicitAny=false, reportUnusedCallResult=false
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportAny=false, reportExplicitAny=false, reportUnusedCallResult=false, reportUnusedFunction=false, reportImplicitRelativeImport=false
 
 import argparse
 import csv
@@ -28,7 +28,7 @@ from src.eval import ArtifactValidationError, validate_experiment_artifacts  # n
 PLOT_FILES = ["confusion_matrix.png", "roc_curve.png", "pr_curve.png"]
 PREDICTION_COLUMNS = ["path", "sample_id", "label", "pred_label", "prob_fake", "score", "split"]
 ROBUSTNESS_FILES = ["robustness_metrics.csv", "robustness_summary.png"]
-REPORT_DEFAULT_PATH = PROJECT_ROOT / "outputs" / "final_implementation_report.md"
+REPORT_DEFAULT_PATH = PROJECT_ROOT / "artifacts" / "reports" / "legacy_final_implementation_report.md"
 
 
 @dataclass(frozen=True)
@@ -59,44 +59,26 @@ class RobustnessAudit:
     findings: list[AuditFinding]
 
 
+GUIDANCE = """
+DEPRECATED: scripts/validate_artifacts.py validates legacy experiment artifacts.
+
+Use the current target workflow and artifact locations instead:
+  python -m src.data.validate_metadata --csv data/metadata/dataset.csv
+  python -m src.eval.evaluate --config configs/default.yaml --model frequency_only --split test
+  python -m src.eval.robustness --config configs/default.yaml --model frequency_only --split test
+
+Current artifacts live under artifacts/features/, artifacts/checkpoints/, artifacts/reports/, and artifacts/figures/. See README.md for the full smoke sequence.
+""".strip()
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Validate experiment artifacts and optionally write a final audit report.")
-    parser.add_argument("--experiment_dir", type=Path, default=None, help="Experiment artifact directory to validate. Existing single-experiment behavior is preserved.")
-    parser.add_argument("--audit_root", type=Path, default=None, help="Root directory to scan for generated experiment and robustness artifacts.")
-    parser.add_argument("--report", action="store_true", help="Write a concise final implementation report from the audit results.")
-    parser.add_argument("--output_path", type=Path, default=REPORT_DEFAULT_PATH, help="Report output path when --report is used. Defaults to outputs/final_implementation_report.md.")
-    return parser.parse_args()
+    return argparse.Namespace()
 
 
 def main() -> int:
-    args = parse_args()
-    if args.experiment_dir is None and args.audit_root is None:
-        print("artifact validation failed: pass --experiment_dir or --audit_root", file=sys.stderr)
-        return 1
-
-    try:
-        experiments: list[ExperimentAudit] = []
-        robustness: RobustnessAudit | None = None
-        if args.experiment_dir is not None:
-            validate_experiment_artifacts(args.experiment_dir)
-            experiment_audit = audit_experiment(args.experiment_dir)
-            experiments.append(experiment_audit)
-            _raise_on_failed_experiment(experiment_audit)
-            print(f"artifact validation passed: {args.experiment_dir}")
-        if args.audit_root is not None:
-            experiments.extend(audit_experiment(path) for path in discover_experiment_dirs(args.audit_root))
-            robustness = audit_robustness(args.audit_root)
-            for experiment in experiments:
-                _raise_on_failed_experiment(experiment)
-            _raise_on_failed_robustness(robustness)
-            print(f"artifact audit passed: {args.audit_root} ({len(experiments)} experiment artifact directories)")
-        if args.report:
-            report_path = write_final_report(args.output_path, experiments, robustness, audit_root=args.audit_root)
-            print(f"wrote final implementation report: {report_path}")
-        return 0
-    except (ArtifactValidationError, OSError, TypeError, ValueError, yaml.YAMLError) as error:
-        print(f"artifact validation failed: {error}", file=sys.stderr)
-        return 1
+    args = sys.argv[1:]
+    print(GUIDANCE, file=sys.stderr)
+    return 0 if any(arg in {"-h", "--help"} for arg in args) else 2
 
 
 def discover_experiment_dirs(root: str | Path) -> list[Path]:
@@ -183,19 +165,19 @@ def write_final_report(output_path: str | Path, experiments: list[ExperimentAudi
         "",
         "## Created/Modified Files",
         "- Project configuration and dependency files: `README.md`, `requirements.txt`, `configs/`.",
-        "- Data and manifest pipeline: `scripts/prepare_cifake_subset.py`, `src/data/`, and related tests.",
-        "- Feature extraction and cache pipeline: `scripts/extract_frequency_features.py`, `scripts/extract_clip_features.py`, `src/features/`, and related tests.",
-        "- Training and model artifacts pipeline: `scripts/train_classifier.py`, `src/train/`, `src/models/`, and related tests.",
-        "- Evaluation, robustness, and artifact audit pipeline: `scripts/evaluate.py`, `scripts/run_robustness.py`, `scripts/validate_artifacts.py`, `src/eval/`, and related tests.",
-        "- Experiment orchestration: `scripts/run_all_experiments.py`.",
+        "- Data pipeline: `src/data/` canonical metadata modules and related tests.",
+        "- Feature extraction and cache pipeline: `src/features/` target cache modules and related tests.",
+        "- Training and model artifacts pipeline: `src/train/`, `src/models/`, and related tests.",
+        "- Evaluation, robustness, and artifact audit pipeline: `src/eval/` and related tests.",
+        "- Experiment orchestration: target `python -m src...` smoke commands documented in README.md.",
         "- Inference and demo surface: `src/inference/`, `app/streamlit_app.py`, and related tests.",
         "",
         "## Runnable Commands",
-        "- `python scripts/run_all_experiments.py --quick`",
-        "- `python scripts/validate_artifacts.py --experiment_dir <experiment_dir>`",
-        "- `python scripts/validate_artifacts.py --audit_root outputs --report`",
-        "- `python -m compileall scripts src tests`",
-        "- `pytest -q`",
+        "- `python -m src.data.make_dummy_dataset --num_real 30 --num_fake 30 --output_dir data/raw/dummy --csv data/metadata/dataset.csv`",
+        "- `python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split train`",
+        "- `python -m src.train.train_frequency --config configs/default.yaml`",
+        "- `python -m src.eval.evaluate --config configs/default.yaml --model frequency_only --split test`",
+        "- `python -m src.eval.robustness --config configs/default.yaml --model frequency_only --split test`",
         "",
         "## Implemented",
         _bullet_or_not_run(implemented_items),
@@ -207,9 +189,9 @@ def write_final_report(output_path: str | Path, experiments: list[ExperimentAudi
         _bullet_or_not_run(deferred_items),
         "",
         "## Result Structure",
-        "- Experiment directories contain `config.yaml`, `metrics.json`, `predictions.csv`, model/scaler joblib files, and confusion/ROC/PR plots.",
-        "- Robustness outputs, when run, contain `robustness_metrics.csv` and `robustness_summary.png`.",
-        "- Final audit reports are written under `outputs/` unless `--output_path` is provided.",
+        "- Target artifacts contain `.npy` feature caches, PyTorch checkpoints, report JSON/CSV files, and DetectorService figures.",
+        "- Robustness outputs, when run through the target evaluator, contain model robustness metrics CSV files.",
+        "- Final target reports are written under `artifacts/reports/`.",
         "",
         "## Audit Findings",
     ]
@@ -290,7 +272,7 @@ def _validate_probability_semantics(config: dict[str, Any], rows: list[dict[str,
     probability_supported = bool(config.get("probability_supported", False))
     decision_score_only = bool(config.get("decision_score_only", False))
     if classifier_key == "logistic_regression" and not probability_supported:
-        findings.append(AuditFinding("fail", "probability", "LogisticRegression artifacts must declare probability_supported=true", (directory / "config.yaml").as_posix()))
+        findings.append(AuditFinding("fail", "probability", "probability artifacts must declare probability_supported=true", (directory / "config.yaml").as_posix()))
     if probability_supported:
         for index, row in enumerate(rows, start=2):
             if not _is_probability(row.get("prob_fake", "")):
@@ -310,7 +292,7 @@ def _validate_streamlit_eligibility(config: dict[str, Any], directory: Path) -> 
     classifier_key = str(classifier.get("key", ""))
     expected = mode == "frequency_only" and classifier_key == "logistic_regression" and probability_supported
     if eligible != expected:
-        return [AuditFinding("fail", "streamlit", "Streamlit probability eligibility must be true only for frequency_only LogisticRegression probability artifacts", (directory / "config.yaml").as_posix())]
+        return [AuditFinding("fail", "streamlit", "Streamlit probability eligibility must be true only for frequency_only probability artifacts", (directory / "config.yaml").as_posix())]
     return []
 
 

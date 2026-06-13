@@ -1,286 +1,362 @@
 # AI-GEN Image Detector
 
-머신러닝 텀 프로젝트를 위한 실험용 이미지 탐지기입니다. 이 프로젝트는 CIFAKE 형식의 이미지를 real 또는 fake로 분류하기 위해 사람이 설계한 주파수 특징, 고정된 openCLIP ViT-B/32 이미지 임베딩, 그리고 두 특징을 결합한 fusion 특징을 비교합니다.
+AI-GEN Image Detector is a machine learning term project for experimental real vs AI-generated image detection. The current workflow uses a canonical `dataset.csv`, cached `.npy` features, PyTorch MLP checkpoints, a shared `DetectorService`, and a Streamlit demo at `src/app/app.py`.
+
+This is not a forensic or legal evidence tool. `label=0` means real, `label=1` means fake or AI-generated, and every probability reported by the project is a fake or AI-generated probability. Treat results as experiment outputs, not proof about an image.
+
+## Folder Structure
+
+```text
+configs/default.yaml          Main project config
+data/raw/                     Local image files, including dummy data
+data/metadata/dataset.csv     Canonical metadata table
+artifacts/features/           .npy feature caches and metadata copies
+artifacts/checkpoints/        PyTorch .pt model checkpoints
+artifacts/reports/            Metrics, predictions, and CSV reports
+artifacts/figures/            Visualizations and Streamlit uploads
+src/data/                     Metadata, dummy data, datasets, transforms
+src/features/                 Frequency and optional CLIP feature extraction
+src/train/                    PyTorch frequency, CLIP, and fusion trainers
+src/eval/                     Evaluation and robustness commands
+src/inference/                DetectorService for single-image prediction
+src/app/app.py                Streamlit demo
+scripts/                      Legacy compatibility wrappers only
+outputs/                      Legacy output location only
+app/streamlit_app.py          Legacy Streamlit entrypoint only
+```
+
+## Setup
+
+Use Python 3.10 or newer. The project has been run with a conda environment named `ml_termproj`.
+
+```bash
+conda activate ml_termproj
+pip install -r requirements.txt
+```
+
+If you don't already have the conda environment, create it first with your local Python version, then run the two commands above. The mandatory quick start below is CPU-safe and doesn't require CUDA or CLIP model downloads.
+
+## Config
+
+The default config is `configs/default.yaml`.
+
+Important fields:
+
+```yaml
+project:
+  seed: 42
+  device: cuda
+paths:
+  dataset_csv: data/metadata/dataset.csv
+  raw_data_dir: data/raw
+  feature_dir: artifacts/features
+  checkpoint_dir: artifacts/checkpoints
+  report_dir: artifacts/reports
+  figure_dir: artifacts/figures
+frequency:
+  method: dct
+  image_size: 224
+  radial_bins: 64
+clip:
+  model_name: ViT-B-32
+  pretrained: openai
+classifier:
+  type: mlp
+train:
+  epochs: 20
+```
+
+`project.device` is resolved at runtime. The frequency-only quick start remains usable on CPU-only machines. CLIP paths may need installed `open_clip_torch`, cached model weights, network access, and a working CPU or CUDA PyTorch setup.
+
+## Canonical `dataset.csv` Schema
+
+The primary metadata file is `data/metadata/dataset.csv`. It must use this exact column order:
+
+```text
+image_id, filepath, label, class_name, dataset, generator, split, width, height, ext
+```
+
+Rules enforced by `src.data.validate_metadata`:
+
+- `label=0` means real and `class_name=real`.
+- `label=1` means fake or AI-generated and `class_name=fake`.
+- `split` must be one of `train`, `val`, or `test`.
+- `filepath` must point to an existing image.
+- `image_id` and `filepath` must be unique.
+- Width and height must be positive integers.
 
-이 앱과 스크립트는 연구용 도구이며, 포렌식 도구가 아닙니다. prob_fake는 학습된 모델이 내는 실험적 신뢰도 점수입니다. 확정적인 증거가 아니며, 어떤 이미지가 실제 사진인지 AI 생성 이미지인지 판단하는 법적 증거로 사용해서는 안 됩니다.
+## Mandatory Quick Start, CPU Frequency Only
+
+This is the canonical smoke path. It creates a tiny dummy dataset, validates metadata, caches frequency features, trains the frequency-only PyTorch MLP, evaluates it, runs robustness, and starts the Streamlit demo. It doesn't require CIFAKE, GenImage, CUDA, CLIP weights, or network access.
+
+```bash
+python -m src.data.make_dummy_dataset \
+  --num_real 30 \
+  --num_fake 30 \
+  --output_dir data/raw/dummy \
+  --csv data/metadata/dataset.csv
 
-## 아키텍처
+python -m src.data.validate_metadata \
+  --csv data/metadata/dataset.csv
 
-    로컬 CIFAKE 형식 폴더
-      real/ 및 fake/ 이미지
-            |
-            v
-    scripts/prepare_cifake_subset.py
-      결정적 split, labels, hashes, dimensions를 담은 manifest v1 CSV
-            |
-            +-------------------------------+
-            |                               |
-            v                               v
-    scripts/extract_frequency_features.py   scripts/extract_clip_features.py
-      FFT/DCT feature_cache_v1 .pt           openCLIP ViT-B/32 feature_cache_v1 .pt
-            |                               |
-            +---------------+---------------+
-                            v
-    scripts/train_classifier.py
-      frequency_only, clip_only, 또는 fusion
-      LogisticRegression 또는 Linear SVM
-                            |
-                            v
-    scripts/evaluate.py 및 scripts/validate_artifacts.py
-      metrics.json, predictions.csv, ROC, PR, confusion matrix
-                            |
-                            +--------------------+
-                            |                    |
-                            v                    v
-    scripts/run_robustness.py           app/streamlit_app.py
-      JPEG, resize, blur 검사            artifact 기반 JPG/PNG 데모
+python -m src.features.cache_features \
+  --config configs/default.yaml \
+  --feature_type frequency \
+  --split train
 
-이 구현에서는 label을 real=0, fake=1로 고정합니다. 캐시는 manifest 순서와 metadata에 맞춰 검증되므로, 오래되었거나 행이 어긋난 feature가 조용히 재사용되지 않고 즉시 실패합니다.
+python -m src.features.cache_features \
+  --config configs/default.yaml \
+  --feature_type frequency \
+  --split val
 
-## 설치
+python -m src.features.cache_features \
+  --config configs/default.yaml \
+  --feature_type frequency \
+  --split test
 
-깨끗한 환경에서 Python 3.10 이상을 사용하세요.
+python -m src.train.train_frequency \
+  --config configs/default.yaml
 
-    python -m venv .venv
-    source .venv/bin/activate
-    python -m pip install --upgrade pip
-    python -m pip install -r requirements.txt
+python -m src.eval.evaluate \
+  --config configs/default.yaml \
+  --model frequency_only \
+  --split test
 
-CUDA로 CLIP 특징을 추출하려면 나머지 requirements를 설치하거나 테스트하기 전에 대상 CUDA runtime과 맞는 PyTorch 빌드를 설치하세요. CPU quick 경로에는 CUDA가 필요하지 않습니다.
+python -m src.eval.robustness \
+  --config configs/default.yaml \
+  --model frequency_only \
+  --split test
 
-## CIFAKE 로컬 데이터 준비
+streamlit run src/app/app.py
+```
 
-스크립트는 real과 fake라는 class 폴더가 있는 로컬 CIFAKE 형식 디렉터리를 사용합니다. 폴더명은 대소문자를 구분하지 않습니다. manifest 코드는 train/real, train/fake, test/real, test/fake처럼 중첩된 source split도 지원합니다.
+In the demo sidebar, keep the default `frequency_only` model for this smoke path. Upload a JPG, JPEG, or PNG after the checkpoint exists. The app saves uploads under `artifacts/figures/uploads/` and displays fake or AI-generated probability, final decision, confidence, branch scores when available, and frequency visualizations.
 
-예시 구조:
+## Dummy Dataset Generation
 
-    data/cifake/
-      train/
-        real/
-        fake/
-      test/
-        real/
-        fake/
+Generate deterministic dummy RGB PNG images and `dataset.csv` metadata:
 
-결정적인 manifest를 만듭니다:
+```bash
+python -m src.data.make_dummy_dataset \
+  --num_real 30 \
+  --num_fake 30 \
+  --output_dir data/raw/dummy \
+  --csv data/metadata/dataset.csv
+```
 
-    python scripts/prepare_cifake_subset.py --data_root data/cifake --output_manifest outputs/manifests/cifake_manifest.csv --seed 42
+Optional arguments include `--width`, `--height`, and `--seed`. Dummy data proves the workflow is connected. It doesn't measure real detector quality.
 
-작은 로컬 subset이 필요하면 class별 개수를 제한합니다:
+## Metadata Validation
 
-    python scripts/prepare_cifake_subset.py --data_root data/cifake --output_manifest outputs/manifests/cifake_small_manifest.csv --num_real 500 --num_fake 500 --seed 42
+Validate `dataset.csv` before caching features:
 
-기존 manifest를 다시 만들지 않고 검증합니다:
+```bash
+python -m src.data.validate_metadata \
+  --csv data/metadata/dataset.csv
+```
 
-    python scripts/prepare_cifake_subset.py --validate_manifest outputs/manifests/cifake_manifest.csv
+The command prints split, label, generator, and dataset counts. It exits nonzero on missing files, duplicate IDs, bad labels, class polarity mistakes, invalid splits, or wrong column order.
 
-## Phase A 빠른 실행
+## Feature Caches
 
-먼저 CPU에서 부담 없이 돌릴 수 있는 smoke 경로를 실행하세요:
+Feature caches are written under `artifacts/features/<feature_type>/` as `.npy` arrays plus a metadata CSV:
 
-    python scripts/run_all_experiments.py --quick
+```text
+artifacts/features/frequency/train_features.npy
+artifacts/features/frequency/train_labels.npy
+artifacts/features/frequency/train_meta.csv
+artifacts/features/clip/train_features.npy
+artifacts/features/clip/train_labels.npy
+artifacts/features/clip/train_meta.csv
+```
 
-기본적으로 이 명령은 outputs/run_all_experiments/quick_data 아래에 아주 작은 synthetic 이미지를 만들고, manifest를 만든 뒤, frequency feature를 추출합니다. 이어서 frequency-only LogisticRegression을 학습하고, artifact를 평가하고, 출력물을 검증합니다. 명시적으로 요청하지 않으면 CLIP은 건너뜁니다.
+Create frequency caches for each split:
 
-선택 사항인 quick CLIP smoke:
+```bash
+python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split train
+python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split val
+python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split test
+```
 
-    python scripts/run_all_experiments.py --quick --quick_include_clip
+Frequency extraction uses the config's DCT settings by default. Cache loading validates row counts, labels, split values, duplicate `image_id` values, finite feature values, and metadata alignment.
 
-이 명령은 openCLIP 모델을 다운로드할 수 있으며, 네트워크, 패키지, 모델 캐시 문제로 실패할 수 있습니다. quick synthetic run은 전체 실행 흐름이 연결되어 있는지 확인하는 증거로만 보세요. CIFAKE 성능이나 실제 환경에서의 detector 타당성을 증명하지는 않습니다.
+## Optional CLIP Caches
 
-## 전체 로컬 실험 흐름
+CLIP is optional. Skip this section when working offline, when `open_clip_torch` isn't installed, or when model weights can't be downloaded or found in cache.
 
-실제 로컬 CIFAKE subset에서 캐시를 준비하고 각 모델을 학습합니다. 아래 명령은 현재 script help text와 일치합니다.
+```bash
+python -m src.features.cache_features --config configs/default.yaml --feature_type clip --split train
+python -m src.features.cache_features --config configs/default.yaml --feature_type clip --split val
+python -m src.features.cache_features --config configs/default.yaml --feature_type clip --split test
+```
 
-### Frequency Feature 추출
+The default CLIP config is `ViT-B-32` with `pretrained: openai`. These commands may contact model hosting services unless the weights already exist locally. A failed CLIP cache doesn't block the frequency-only workflow.
 
-    python scripts/extract_frequency_features.py --manifest outputs/manifests/cifake_manifest.csv --output_cache outputs/caches/cifake_frequency.pt --seed 42
+## Training
 
-frequency vector는 224x224 luminance preprocessing, FFT radial features, whole-image DCT summaries, block DCT summaries를 사용합니다.
+All primary trainers use cached `.npy` features and write PyTorch checkpoints to `artifacts/checkpoints/`.
 
-### CLIP Feature 추출
+Frequency-only training, required for the CPU smoke path:
 
-    python scripts/extract_clip_features.py --manifest outputs/manifests/cifake_manifest.csv --output_cache outputs/caches/cifake_clip.pt --batch_size 32 --device auto --seed 42
+```bash
+python -m src.train.train_frequency \
+  --config configs/default.yaml
+```
 
-작은 smoke extraction을 실행하려면:
+CLIP-only training, optional and requires CLIP caches:
 
-    python scripts/extract_clip_features.py --manifest outputs/manifests/cifake_manifest.csv --output_cache outputs/caches/cifake_clip_smoke.pt --max_samples 2 --batch_size 2 --device auto --smoke --write_blocker .sisyphus/evidence/clip_smoke_blocker.txt
+```bash
+python -m src.train.train_clip \
+  --config configs/default.yaml
+```
 
-기본 model은 hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K입니다.
+Fusion training, optional and requires both CLIP and frequency caches aligned by `image_id`:
 
-### Classifier 학습
+```bash
+python -m src.train.train_fusion \
+  --config configs/default.yaml
+```
 
-Frequency-only LogisticRegression:
+Expected checkpoint names:
 
-    python scripts/train_classifier.py --manifest outputs/manifests/cifake_manifest.csv --frequency_cache outputs/caches/cifake_frequency.pt --output_dir outputs/experiments/frequency_only_logistic_regression --mode frequency_only --classifier logistic_regression --seed 42
+```text
+artifacts/checkpoints/frequency_only.pt
+artifacts/checkpoints/clip_only.pt
+artifacts/checkpoints/fusion.pt
+```
 
-CLIP-only LogisticRegression:
+The checkpoints contain model state plus metadata such as `feature_type`, `model_name`, `input_dim`, `hidden_dim`, `threshold`, and a config snapshot.
 
-    python scripts/train_classifier.py --manifest outputs/manifests/cifake_manifest.csv --clip_cache outputs/caches/cifake_clip.pt --output_dir outputs/experiments/clip_only_logistic_regression --mode clip_only --classifier logistic_regression --seed 42
+## Evaluation
 
-Fusion LogisticRegression:
+Evaluate any trained model on a cached split:
 
-    python scripts/train_classifier.py --manifest outputs/manifests/cifake_manifest.csv --frequency_cache outputs/caches/cifake_frequency.pt --clip_cache outputs/caches/cifake_clip.pt --output_dir outputs/experiments/fusion_logistic_regression --mode fusion --classifier logistic_regression --seed 42
+```bash
+python -m src.eval.evaluate \
+  --config configs/default.yaml \
+  --model frequency_only \
+  --split test
+```
 
-같은 mode에서 Linear SVM도 사용할 수 있습니다:
+Optional model names are `clip_only` and `fusion` when their caches and checkpoints exist:
 
-    python scripts/train_classifier.py --manifest outputs/manifests/cifake_manifest.csv --frequency_cache outputs/caches/cifake_frequency.pt --output_dir outputs/experiments/frequency_only_linear_svm --mode frequency_only --classifier linear_svm --seed 42
+```bash
+python -m src.eval.evaluate --config configs/default.yaml --model clip_only --split test
+python -m src.eval.evaluate --config configs/default.yaml --model fusion --split test
+```
 
-Linear SVM artifact는 decision score만 제공합니다. predict_proba를 제공하지 않으므로, 나중에 calibration을 추가하지 않는 한 Streamlit probability inference에는 사용할 수 없습니다.
+Evaluation writes JSON and CSV reports under `artifacts/reports/`:
 
-### 평가 및 Artifact 검증
+```text
+artifacts/reports/frequency_only_test_metrics.json
+artifacts/reports/frequency_only_test_predictions.csv
+artifacts/reports/frequency_only_test_per_generator_metrics.csv
+artifacts/reports/model_comparison.csv
+```
 
-    python scripts/evaluate.py --experiment_dir outputs/experiments/frequency_only_logistic_regression --validate
+`pred_prob` is the fake or AI-generated probability from `torch.sigmoid(logit)`. `pred_label` is assigned with the checkpoint threshold, default `0.5`.
 
-metrics를 새로 만들지 않고 검증만 하려면:
+## Robustness
 
-    python scripts/validate_artifacts.py --experiment_dir outputs/experiments/frequency_only_logistic_regression
+Run corruption robustness on a trained checkpoint:
 
-evaluator는 metrics.json, predictions.csv, confusion_matrix.png, roc_curve.png, pr_curve.png를 쓰거나 확인합니다.
+```bash
+python -m src.eval.robustness \
+  --config configs/default.yaml \
+  --model frequency_only \
+  --split test
+```
 
-### 전체 자동 실행
+The default config checks JPEG quality, resize, and blur settings. The command writes:
 
-로컬 data root를 사용하는 frequency-only full mode 실행:
+```text
+artifacts/reports/frequency_only_robustness_metrics.csv
+```
 
-    python scripts/run_all_experiments.py --data_root data/cifake --output_root outputs/full_run
+CLIP-only and fusion robustness are optional and may load CLIP at runtime:
 
-CLIP-only와 fusion 실험을 포함하려면:
+```bash
+python -m src.eval.robustness --config configs/default.yaml --model clip_only --split test
+python -m src.eval.robustness --config configs/default.yaml --model fusion --split test
+```
 
-    python scripts/run_all_experiments.py --data_root data/cifake --output_root outputs/full_run --include_clip
+## Streamlit Demo
 
-리소스가 제한된 환경에서 범위를 정한 로컬 run을 실행하려면 --max_samples_per_class를 사용하세요.
+Start the current demo with:
 
-## Robustness 검사
+```bash
+streamlit run src/app/app.py
+```
 
-clean-trained frequency LogisticRegression artifact에서 JPEG, resize, blur robustness 검사를 실행합니다:
+The default sidebar selection is `frequency_only`, which matches the mandatory quick start. `clip_only` and `fusion` are selectable only after their checkpoints and CLIP runtime path are ready. The app routes prediction through `DetectorService`, saves uploaded files to `artifacts/figures/uploads/`, and creates spectrum visualizations in `artifacts/figures/`.
 
-    python scripts/run_robustness.py --manifest outputs/manifests/cifake_manifest.csv --experiment_dir outputs/experiments/frequency_only_logistic_regression --output_dir outputs/robustness/frequency_only_logistic_regression --quick
+## Artifact Locations
 
-robustness 코드는 clean-trained scaler와 classifier를 재사용합니다. 손상된 이미지로 다시 학습하지 않습니다. 출력물은 robustness_metrics.csv와 robustness_summary.png입니다.
+Primary artifacts live here:
 
-## Streamlit 데모
+```text
+artifacts/features/      .npy feature arrays, label arrays, split metadata
+artifacts/checkpoints/   PyTorch checkpoints: frequency_only.pt, clip_only.pt, fusion.pt
+artifacts/reports/       Metrics JSON, predictions CSV, per-generator CSV, robustness CSV
+artifacts/figures/       Spectrum images, radial spectrum plots, uploaded demo files
+```
 
-로컬 데모를 실행합니다:
+The old `outputs/` directory, manifest-v1 files, `.pt` feature caches, sklearn model artifacts, `python scripts/...` commands, and `app/streamlit_app.py` belong to the deprecated compatibility workflow. They are not the primary path for this refactor.
 
-    streamlit run app/streamlit_app.py
+## Full Optional CLIP Path
 
-config.yaml, model.joblib, scaler.joblib이 들어 있는 artifact directory를 사용하세요. 현재 predictor는 frequency-only LogisticRegression probability artifact를 지원합니다. JPG, JPEG, PNG 업로드를 받을 수 있으며 fake probability threshold의 기본값은 0.5입니다.
+Only run this path when CLIP dependencies and weights are available:
 
-앱에는 다음 경고가 표시됩니다:
+```bash
+python -m src.features.cache_features --config configs/default.yaml --feature_type clip --split train
+python -m src.features.cache_features --config configs/default.yaml --feature_type clip --split val
+python -m src.features.cache_features --config configs/default.yaml --feature_type clip --split test
+python -m src.train.train_clip --config configs/default.yaml
+python -m src.eval.evaluate --config configs/default.yaml --model clip_only --split test
+```
 
-    이 detector는 제한된 benchmark data로 학습한 실험용 model입니다.
-    이미지가 실제 사진인지 AI 생성 이미지인지 판단하는 확정적 증거로 사용해서는 안 됩니다.
+Fusion needs both branches:
 
-## Artifact 위치
+```bash
+python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split train
+python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split val
+python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split test
+python -m src.features.cache_features --config configs/default.yaml --feature_type clip --split train
+python -m src.features.cache_features --config configs/default.yaml --feature_type clip --split val
+python -m src.features.cache_features --config configs/default.yaml --feature_type clip --split test
+python -m src.train.train_fusion --config configs/default.yaml
+python -m src.eval.evaluate --config configs/default.yaml --model fusion --split test
+python -m src.eval.robustness --config configs/default.yaml --model fusion --split test
+```
 
-자주 쓰는 경로:
+No remote RTX, CUDA, or full CLIP completion is claimed by this README. Add that claim only when real evidence files record the command, exit code, PyTorch and CUDA versions, device name, OpenCLIP version, and produced artifacts.
 
-    outputs/manifests/                         manifest CSV 파일
-    outputs/caches/                            feature_cache_v1 .pt 파일
-    outputs/experiments/<experiment_name>/     학습된 model artifact와 plot
-    outputs/robustness/<experiment_name>/      robustness CSV 및 PNG 파일
-    outputs/run_all_experiments/               기본 quick smoke 출력물
+## Limitations
 
-experiment directory에는 다음 파일이 들어 있습니다:
+This detector is experimental. It shouldn't be used as legal, forensic, academic misconduct, or policy enforcement evidence.
 
-    config.yaml
-    model.joblib
-    scaler.joblib
-    metrics.json
-    predictions.csv
-    confusion_matrix.png
-    roc_curve.png
-    pr_curve.png
+Known limits:
 
-predictions.csv는 probability를 낼 수 있는 LogisticRegression artifact에서 prob_fake를 사용합니다. decision score만 있는 artifact는 prob_fake를 비워 두고 score로 ranking metrics를 보고합니다.
+- Dummy data verifies the command path only. It says nothing about real-world accuracy.
+- Results depend on the source dataset, split, generator mix, preprocessing, and class balance.
+- CIFAKE-style or small local data doesn't prove generalization to Midjourney, DALL-E, SDXL, FLUX, camera images, screenshots, or edited images.
+- Frequency features can be sensitive to JPEG compression, resizing, blur, cropping, and other processing.
+- CLIP paths are optional and can fail offline because of dependency, network, or model-cache issues.
+- A `0.5` threshold is the default checkpoint threshold, not a universal truth boundary.
+- Per-generator metrics can be undefined for one-class groups. In that case ROC AUC is reported as null with a warning in the implementation.
 
-## 결과 해석
+## Final Smoke Path
 
-출력물은 실험 증거로만 사용하세요:
+For final local smoke before handing off to T16, use the CPU frequency-only sequence:
 
-- prob_fake는 실험적 모델 신뢰도 점수이며, 확정적 증거나 법적 증거가 아닙니다.
-- Accuracy, ROC AUC, PR AUC는 manifest split과 source data에 따라 달라집니다.
-- Threshold 0.5는 고정 기본값이며, test split에 맞춰 튜닝한 threshold가 아닙니다.
-- Linear SVM score는 margin이며, calibration된 probability가 아닙니다.
-- Quick synthetic output은 script 실행 흐름을 확인할 뿐, dataset 성능을 증명하지 않습니다.
-
-run을 비교하기 전에 항상 metrics.json, predictions.csv, plot, run summary JSON, cache metadata를 확인하세요. label polarity, class balance, split membership, cache freshness도 함께 확인해야 합니다.
-
-## 한계
-
-CIFAKE subset 결과만으로는 일반적인 실제 환경 detector에 대한 주장을 뒷받침할 수 없습니다. CIFAKE는 generator 다양성이 낮고, 작은 로컬 subset은 증거 범위를 더 좁힙니다.
-
-Frequency feature는 JPEG compression, resizing, blur, 그리고 비슷한 preprocessing 변화에 민감할 수 있습니다. 안정성을 이야기하기 전에 robustness 검사가 필요합니다.
-
-DALL-E, Midjourney, SDXL, FLUX 및 다른 generator로 일반화하려면 GenImage, Synthbuster, ForenSynths 같은 외부 dataset이 필요합니다. CIFAKE나 synthetic quick run이 이런 dataset을 대체하지 않습니다.
-
-아래에 적힌 증거가 run log에 남아 있지 않다면 remote CUDA 및 full CLIP run은 완료된 것으로 보지 않습니다. 이 README만 보고 CUDA 완료를 주장하지 마세요.
-
-## Phase C 보류 항목
-
-아래 항목은 의도적으로 보류했습니다:
-
-- checkpointing, reload tests, calibration checks를 포함한 MLP classifier.
-- dataset ID와 schema를 확인한 뒤 진행할 HF loader hardening.
-- RBF SVM.
-- UMAP visualizations.
-- Advanced peak prominence features.
-- 전체 dataset 다운로드 없이 작성하는 GenImage extension note.
-- 더 많은 artifact가 생긴 뒤 다듬을 Streamlit model selector.
-- 선택 사항인 pyproject.toml.
-
-## 위험 및 차단 요인
-
-다음 문제가 발생하면 run log나 notepad에 기록하세요:
-
-- CIFAKE data source가 없거나 예상한 로컬 폴더 구조와 다릅니다.
-- CLIP model download가 실패합니다.
-- remote credential이 없습니다.
-- CUDA package version이 remote driver 또는 runtime과 맞지 않습니다.
-- stale cache reuse가 감지되었거나 의심됩니다.
-- label inversion이 의심됩니다.
-- train/test leakage가 감지되었거나 의심됩니다.
-- robustness runtime이 사용 가능한 machine에 비해 너무 커집니다.
-
-## 원격 RTX5090 CUDA 실행 가이드
-
-원격 실행 정보:
-
-    host: tml-server
-    remote path: ~/codes/ml-project
-    conda env: ml_termproj
-
-로컬 data, outputs, virtualenv, cache artifact를 제외하고 source code를 동기화합니다:
-
-    rsync -av --exclude data/ --exclude outputs/ --exclude .venv/ --exclude __pycache__/ --exclude .pytest_cache/ --exclude .mypy_cache/ --exclude .ruff_cache/ ./ tml-server:~/codes/ml-project/
-
-원격 shell과 environment를 시작합니다:
-
-    ssh tml-server
-    cd ~/codes/ml-project
-    conda activate ml_termproj
-
-실행 환경 증거를 수집합니다:
-
-    python -c "import importlib.metadata, torch; print('torch.__version__=', torch.__version__); print('cuda_available=', torch.cuda.is_available()); print('cuda_device=', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'none'); print('open_clip_torch=', importlib.metadata.version('open_clip_torch'))"
-
-CIFAKE data가 원격 machine에 준비된 뒤 아주 작은 CUDA CLIP smoke를 실행합니다:
-
-    python scripts/prepare_cifake_subset.py --data_root data/cifake --output_manifest outputs/manifests/remote_cifake_smoke.csv --num_real 2 --num_fake 2 --seed 42
-
-    python scripts/extract_clip_features.py --manifest outputs/manifests/remote_cifake_smoke.csv --output_cache outputs/caches/remote_clip_smoke.pt --max_samples 4 --batch_size 2 --device cuda --smoke --write_blocker .sisyphus/evidence/remote_clip_smoke_blocker.txt
-
-더 큰 원격 run은 먼저 sample count를 제한해서 시작합니다:
-
-    python scripts/run_all_experiments.py --data_root data/cifake --output_root outputs/remote_full_run --include_clip --max_samples_per_class 1000
-
-원격 CUDA 실행에서 수집해야 할 증거 항목:
-
-- 정확한 command와 exit code가 포함된 command log.
-- torch.__version__.
-- CUDA availability와 device name.
-- open_clip_torch version.
-- 생성된 .pt file의 cache metadata, feature type, model ID, manifest hash, row count, device 포함.
-- 각 experiment directory의 metrics와 artifact list.
-
-이 repository는 현재 원격 CUDA smoke나 full run이 완료되었다고 주장하지 않습니다. 위 증거가 실제로 존재할 때만 그 주장을 추가하세요.
+```bash
+python -m src.data.make_dummy_dataset --num_real 30 --num_fake 30 --output_dir data/raw/dummy --csv data/metadata/dataset.csv
+python -m src.data.validate_metadata --csv data/metadata/dataset.csv
+python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split train
+python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split val
+python -m src.features.cache_features --config configs/default.yaml --feature_type frequency --split test
+python -m src.train.train_frequency --config configs/default.yaml
+python -m src.eval.evaluate --config configs/default.yaml --model frequency_only --split test
+python -m src.eval.robustness --config configs/default.yaml --model frequency_only --split test
+streamlit run src/app/app.py
+```
