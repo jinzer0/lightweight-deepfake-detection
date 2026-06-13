@@ -1,33 +1,73 @@
 project:
   name: ai_gen_image_detector
-seed: 42
-labels:
-  real: 0
-  fake: 1
+  seed: 42
+  device: cuda
+
 paths:
-  data_root: data
-  manifest_dir: outputs/manifests
-  cache_dir: outputs/cache
-  experiment_dir: outputs/experiments
-  model_dir: outputs/models
-features:
+  dataset_csv: data/metadata/dataset.csv
+  raw_data_dir: data/raw
+  feature_dir: artifacts/features
+  checkpoint_dir: artifacts/checkpoints
+  report_dir: artifacts/reports
+  figure_dir: artifacts/figures
+
+data:
   image_size: 224
-  clip:
-    enabled: true
-    model_id: hf-hub:laion/CLIP-ViT-B-32-laion2B-s34B-b79K
-    model_name: ViT-B-32
-    pretrained: laion2b_s34b_b79k
-    batch_size: 32
-    cache_subdir: clip
-  frequency:
-    enabled: true
-    image_size: 224
-    grayscale: true
-    radial_bins: 64
-    cache_subdir: frequency
+  batch_size: 32
+  num_workers: 4
+  label_map:
+    real: 0
+    fake: 1
+  splits:
+    train: train
+    val: val
+    test: test
+
+clip:
+  model_name: ViT-B-32
+  pretrained: openai
+  output_dim: 512
+  freeze: true
+  normalize_feature: true
+
+frequency:
+  method: dct
+  image_size: 224
+  grayscale: true
+  radial_bins: 64
+  log_scale: true
+  normalize_feature: true
+
 classifier:
-  name: logistic_regression
-  params:
-    max_iter: 1000
-    random_state: 42
-mode: fusion
+  type: mlp
+  hidden_dim: 256
+  dropout: 0.2
+  num_classes: 1
+
+train:
+  epochs: 20
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  early_stopping_patience: 5
+  loss: bce_with_logits
+
+eval:
+  threshold: 0.5
+  metrics:
+    - accuracy
+    - precision
+    - recall
+    - f1
+    - roc_auc
+  per_generator: true
+  save_predictions: true
+
+robustness:
+  jpeg_qualities: [95, 75, 50]
+  resize_scales: [0.5]
+  blur_sigmas: [1.0, 2.0]
+
+demo:
+  confidence:
+    high_margin: 0.25
+    medium_margin: 0.10

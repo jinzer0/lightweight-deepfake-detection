@@ -6,7 +6,30 @@ __pycache__/
 .pytest_cache/
 
 # Generated data, caches, and experiment outputs
-data/
+data/*
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+!data/processed/
+data/processed/*
+!data/processed/.gitkeep
+!data/metadata/
+data/metadata/*
+!data/metadata/.gitkeep
+!data/metadata/dataset.csv.example
+artifacts/*
+!artifacts/features/
+artifacts/features/*
+!artifacts/features/.gitkeep
+!artifacts/checkpoints/
+artifacts/checkpoints/*
+!artifacts/checkpoints/.gitkeep
+!artifacts/reports/
+artifacts/reports/*
+!artifacts/reports/.gitkeep
+!artifacts/figures/
+artifacts/figures/*
+!artifacts/figures/.gitkeep
 outputs/**
 !outputs/
 !outputs/.gitkeep
@@ -17,3 +40,4 @@ outputs/**
 
 .playwright-mcp/
 .sisyphus/
+.omo/
