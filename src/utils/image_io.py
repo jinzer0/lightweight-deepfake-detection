@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportAny=false, reportExplicitAny=false
+# pyright: reportMissingImports=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnknownMemberType=false
 
 from pathlib import Path
 from typing import Any
@@ -13,7 +13,7 @@ except ModuleNotFoundError as exc:
     raise ModuleNotFoundError("Pillow is required for src.utils.image_io; install dependencies with `pip install -r requirements.txt`.") from exc
 
 
-DEFAULT_FREQUENCY_IMAGE_SIZE = 224
+DEFAULT_FREQUENCY_IMAGE_SIZE = 512
 DCT_BLOCK_SIZE = 8
 LUMINANCE_WEIGHTS = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 

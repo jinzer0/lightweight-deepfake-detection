@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportAny=false, reportExplicitAny=false, reportUnusedParameter=false, reportUnknownArgumentType=false, reportUnannotatedClassAttribute=false, reportIncompatibleMethodOverride=false, reportImplicitOverride=false
 
 import sys
 import types
@@ -13,7 +12,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from src.features import clip_features
-from src.features.clip_features import ClipModelLoadError, extract_clip_features, l2_normalize, load_clip_model
+from src.features.clip_features import ClipModelLoadError, extract_clip_features, l2_normalize, load_clip_model, load_clip_model_and_preprocess
 
 
 def test_load_clip_model_uses_open_clip_config_and_freezes_parameters(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -34,6 +33,26 @@ def test_load_clip_model_uses_open_clip_config_and_freezes_parameters(monkeypatc
     assert model.to_calls == ["cpu"]
     assert model.eval_calls == 1
     assert all(not parameter.requires_grad for parameter in model.parameters())
+
+
+
+def test_load_clip_model_and_preprocess_uses_hf_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = RecordingClipModel()
+    preprocess = object()
+    calls: list[str] = []
+
+    def create_model_from_pretrained(model_id: str) -> tuple[RecordingClipModel, object]:
+        calls.append(model_id)
+        return model, preprocess
+
+    fake_open_clip = types.SimpleNamespace(create_model_from_pretrained=create_model_from_pretrained)
+    monkeypatch.setitem(sys.modules, "open_clip", fake_open_clip)
+
+    loaded_model, loaded_preprocess = load_clip_model_and_preprocess({"clip": {"hf_hub_model": "hf-hub:test/model"}}, device="cpu")
+
+    assert loaded_model is model
+    assert loaded_preprocess is preprocess
+    assert calls == ["hf-hub:test/model"]
 
 
 def test_load_clip_model_keeps_trainable_parameters_when_freeze_false(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,7 +142,8 @@ class RecordingClipModel(torch.nn.Module):
         self.eval_calls = 0
         self.seen_batches: list[torch.Tensor] = []
 
-    def to(self, device: Any) -> "RecordingClipModel":
+    def to(self, *args: Any, **kwargs: Any) -> "RecordingClipModel":
+        device = args[0] if args else kwargs.get("device", "")
         self.to_calls.append(str(device))
         return self
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from src.data.cifake import generate_manifest
+from src.data.local_manifest import generate_manifest
 from src.features.cache import (
     FeatureCacheError,
     build_metadata,
@@ -30,7 +30,7 @@ def _metadata(feature_dim: int) -> dict[str, object]:
         normalization="raw_unscaled",
         seed=42,
         extra={
-            "image_size": 224,
+            "image_size": 512,
             "radial_bins": DEFAULT_RADIAL_BINS,
             "fft_epsilon": DEFAULT_FFT_EPSILON,
             "dct_policy": DCT_POLICY,
@@ -51,8 +51,8 @@ def _cache(rows: list[dict[str, str]], feature_dim: int = 220) -> dict[str, obje
     )
 
 
-def test_feature_cache_valid_round_trip(synthetic_cifake_root: Path, tmp_path: Path) -> None:
-    rows = _manifest_rows(synthetic_cifake_root)
+def test_feature_cache_valid_round_trip(synthetic_real_fake_root: Path, tmp_path: Path) -> None:
+    rows = _manifest_rows(synthetic_real_fake_root)
     cache = _cache(rows)
     cache_path = tmp_path / "features.pt"
     write_feature_cache(cache, cache_path)
@@ -62,8 +62,8 @@ def test_feature_cache_valid_round_trip(synthetic_cifake_root: Path, tmp_path: P
     assert np.asarray(loaded["features"]).shape == (len(rows), 220)
 
 
-def test_feature_cache_rejects_stale_manifest(synthetic_cifake_root: Path) -> None:
-    rows = _manifest_rows(synthetic_cifake_root)
+def test_feature_cache_rejects_stale_manifest(synthetic_real_fake_root: Path) -> None:
+    rows = _manifest_rows(synthetic_real_fake_root)
     cache = _cache(rows)
     stale_rows = [dict(row) for row in rows]
     stale_rows[0]["rel_path"] = "changed/path.png"
@@ -71,8 +71,8 @@ def test_feature_cache_rejects_stale_manifest(synthetic_cifake_root: Path) -> No
         validate_feature_cache(cache, manifest_rows=stale_rows)
 
 
-def test_feature_cache_rejects_duplicate_missing_and_misaligned_rows(synthetic_cifake_root: Path) -> None:
-    rows = _manifest_rows(synthetic_cifake_root)
+def test_feature_cache_rejects_duplicate_missing_and_misaligned_rows(synthetic_real_fake_root: Path) -> None:
+    rows = _manifest_rows(synthetic_real_fake_root)
 
     duplicate_cache = dict(_cache(rows))
     duplicate_ids = list(duplicate_cache["sample_ids"])
@@ -94,8 +94,8 @@ def test_feature_cache_rejects_duplicate_missing_and_misaligned_rows(synthetic_c
         validate_feature_cache(misaligned_cache, manifest_rows=rows)
 
 
-def test_feature_cache_rejects_non_finite_features(synthetic_cifake_root: Path) -> None:
-    rows = _manifest_rows(synthetic_cifake_root)
+def test_feature_cache_rejects_non_finite_features(synthetic_real_fake_root: Path) -> None:
+    rows = _manifest_rows(synthetic_real_fake_root)
     cache = _cache(rows)
     features = np.asarray(cache["features"]).copy()
     features[0, 0] = np.nan

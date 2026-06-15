@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportAny=false, reportExplicitAny=false, reportUnusedCallResult=false, reportImplicitStringConcatenation=false
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportImplicitStringConcatenation=false
 
 import argparse
 from collections.abc import Mapping, Sequence
@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 
 from src.data.dataset import ALLOWED_SPLITS, ImageMetadataDataset
 from src.data.transforms import get_eval_transform
-from src.features.clip_features import ClipModelLoadError, extract_clip_features, load_clip_model
+from src.features.clip_features import ClipModelLoadError, extract_clip_features, load_clip_model_and_preprocess
 from src.features.frequency_features import FEATURE_DTYPE, extract_frequency_feature
 from src.utils.config import load_config, resolve_device
 
@@ -44,7 +44,7 @@ def cache_frequency_split(config: Mapping[str, Any], split: str) -> tuple[np.nda
     labels: list[int] = []
     for index in range(len(dataset)):
         image, label, _metadata = cast(tuple[Any, int, dict[str, str]], dataset[index])
-        features.append(extract_frequency_feature(image, config))
+        features.append(extract_frequency_feature(image, dict(config)))
         labels.append(int(label))
 
     feature_array = _stack_features(features, dtype=np.dtype(FEATURE_DTYPE))
@@ -55,23 +55,20 @@ def cache_frequency_split(config: Mapping[str, Any], split: str) -> tuple[np.nda
 def cache_clip_split(config: Mapping[str, Any], split: str) -> tuple[np.ndarray, np.ndarray, pd.DataFrame]:
     _validate_split(split)
     dataset_csv = _dataset_csv(config)
-    transform = get_eval_transform(_image_size(config))
-    dataset = ImageMetadataDataset(dataset_csv, split=split, transform=transform, return_metadata=True)
+    device = resolve_device(dict(config))
+    try:
+        model, preprocess = load_clip_model_and_preprocess(config, device=device)
+    except ClipModelLoadError:
+        raise
+    except Exception as exc:
+        raise ClipModelLoadError(f"Failed optional CLIP cache smoke for split={split!r}: {exc}") from exc
+    dataset = ImageMetadataDataset(dataset_csv, split=split, transform=preprocess, return_metadata=True)
     dataloader = DataLoader(
         dataset,
         batch_size=_batch_size(config),
         shuffle=False,
         num_workers=_num_workers(config),
     )
-    device = resolve_device(dict(config))
-
-    try:
-        model = load_clip_model(config, device=device)
-    except ClipModelLoadError:
-        raise
-    except Exception as exc:
-        raise ClipModelLoadError(f"Failed optional CLIP cache smoke for split={split!r}: {exc}") from exc
-
     features, labels, extracted_meta = extract_clip_features(
         model,
         dataloader,
@@ -175,7 +172,7 @@ def cache_paths(config: Mapping[str, Any], *, feature_type: str, split: str) -> 
 def _metadata_for_dataset_rows(rows: Sequence[Mapping[str, Any]], *, split: str, context: str) -> pd.DataFrame:
     frame = pd.DataFrame([dict(row) for row in rows])
     if frame.empty:
-        frame = pd.DataFrame(columns=REQUIRED_META_COLUMNS)
+        frame = pd.DataFrame({column: [] for column in REQUIRED_META_COLUMNS})
     for column in REQUIRED_META_COLUMNS:
         if column not in frame.columns:
             raise NpyFeatureCacheError(f"{context}: split={split!r} dataset metadata missing required column {column!r}")

@@ -19,9 +19,9 @@ def test_load_rgb_image_converts_jpg_and_png(tiny_jpg: Path, tiny_png: Path) -> 
     assert png_image.size == (19, 23)
 
 
-def test_prepare_frequency_image_outputs_224_luminance(tiny_png: Path) -> None:
+def test_prepare_frequency_image_outputs_512_luminance(tiny_png: Path) -> None:
     luminance = prepare_frequency_image(tiny_png)
-    assert luminance.shape == (224, 224)
+    assert luminance.shape == (512, 512)
     assert luminance.dtype == np.float32
     assert np.isfinite(luminance).all()
 
