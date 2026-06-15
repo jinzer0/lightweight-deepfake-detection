@@ -36,7 +36,7 @@ def _frequency_cache(rows: list[dict[str, str]]) -> dict[str, object]:
         normalization="raw_unscaled",
         seed=42,
         extra={
-            "image_size": 224,
+            "image_size": 512,
             "radial_bins": DEFAULT_RADIAL_BINS,
             "fft_epsilon": DEFAULT_FFT_EPSILON,
             "dct_policy": DCT_POLICY,

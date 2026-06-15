@@ -9,15 +9,15 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from src.data.cifake import generate_manifest
+from src.data.local_manifest import generate_manifest
 from src.data.manifest import write_manifest
 from src.features.cache import build_metadata, create_feature_cache, write_feature_cache
 from src.features.frequency import DCT_BACKEND, DCT_POLICY, DEFAULT_FFT_EPSILON, DEFAULT_RADIAL_BINS, FEATURE_DTYPE, FrequencyFeatureConfig, extract_frequency_features
 from src.train.frequency_lr import PREDICTION_COLUMNS, train_frequency_logistic_regression, verify_reload_equivalence
 
 
-def test_phase_a_frequency_training_reload_and_prediction_schema(synthetic_cifake_root: Path, tmp_path: Path) -> None:
-    rows = [{key: str(value) for key, value in row.items()} for row in generate_manifest(synthetic_cifake_root, seed=42)]
+def test_phase_a_frequency_training_reload_and_prediction_schema(synthetic_real_fake_root: Path, tmp_path: Path) -> None:
+    rows = [{key: str(value) for key, value in row.items()} for row in generate_manifest(synthetic_real_fake_root, seed=42)]
     manifest_path = tmp_path / "manifest.csv"
     write_manifest(manifest_path, rows)
 
@@ -29,7 +29,7 @@ def test_phase_a_frequency_training_reload_and_prediction_schema(synthetic_cifak
         normalization="raw_unscaled",
         seed=42,
         extra={
-            "image_size": 224,
+            "image_size": 512,
             "radial_bins": DEFAULT_RADIAL_BINS,
             "fft_epsilon": DEFAULT_FFT_EPSILON,
             "dct_policy": DCT_POLICY,

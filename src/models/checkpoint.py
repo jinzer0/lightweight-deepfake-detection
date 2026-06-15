@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-# pyright: reportAny=false
-
 from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
@@ -56,10 +54,7 @@ def save_checkpoint(
 
 def load_checkpoint(path: str | Path, *, expected_feature_type: str | None = None) -> dict[str, object]:
     checkpoint_path = Path(path)
-    try:
-        loaded = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    except TypeError:
-        loaded = torch.load(checkpoint_path, map_location="cpu")
+    loaded = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     if not isinstance(loaded, dict):
         raise CheckpointError("checkpoint file must contain a dictionary")
     checkpoint = cast(dict[str, object], loaded)
