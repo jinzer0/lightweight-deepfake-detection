@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportAny=false, reportUnusedCallResult=false, reportUnusedParameter=false
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false
 
 import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -89,11 +90,15 @@ def test_train_fusion_writes_artifacts_with_fusion_contract(tmp_path: Path) -> N
 
     assert artifacts.checkpoint_path == tmp_path / "checkpoints" / "fusion.pt"
     assert artifacts.checkpoint_path.is_file()
+    assert (tmp_path / "scalers" / "frequency_scaler.pkl").is_file()
     assert artifacts.train_log_path == tmp_path / "reports" / "fusion_train_log.csv"
     assert artifacts.val_metrics_path == tmp_path / "reports" / "fusion_val_metrics.json"
     checkpoint = load_checkpoint(artifacts.checkpoint_path, expected_feature_type="fusion")
     assert checkpoint["model_name"] == "FusionClassifier"
     assert checkpoint["input_dim"] == 5
+    snapshot = cast(dict[str, Any], checkpoint["config_snapshot"])
+    paths = cast(dict[str, Any], snapshot["paths"])
+    assert paths["frequency_scaler_path"] == (tmp_path / "scalers" / "frequency_scaler.pkl").as_posix()
     metrics = json.loads(artifacts.val_metrics_path.read_text(encoding="utf-8"))
     assert metrics["feature_type"] == "fusion"
     assert metrics["model_name"] == "FusionClassifier"
@@ -128,6 +133,7 @@ def _config(tmp_path: Path) -> dict[str, object]:
             "feature_dir": (tmp_path / "features").as_posix(),
             "checkpoint_dir": (tmp_path / "checkpoints").as_posix(),
             "report_dir": (tmp_path / "reports").as_posix(),
+            "scaler_dir": (tmp_path / "scalers").as_posix(),
         },
         "data": {"batch_size": 2},
         "classifier": {"hidden_dim": 4, "dropout": 0.0},

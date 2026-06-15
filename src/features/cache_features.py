@@ -3,9 +3,9 @@ from __future__ import annotations
 # pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownParameterType=false, reportUnusedCallResult=false, reportImplicitStringConcatenation=false
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, NamedTuple, cast
+from typing import Any, NamedTuple, TypeVar, cast
 
 import numpy as np
 import pandas as pd
@@ -17,9 +17,15 @@ from src.features.clip_features import ClipModelLoadError, extract_clip_features
 from src.features.frequency_features import FEATURE_DTYPE, extract_frequency_feature
 from src.utils.config import load_config, resolve_device
 
+try:
+    from tqdm.auto import tqdm
+except ModuleNotFoundError:  # pragma: no cover - tqdm is a progress nicety
+    tqdm = None
+
 
 FEATURE_TYPES = ("clip", "frequency")
 REQUIRED_META_COLUMNS = ("image_id", "filepath", "label", "class_name", "dataset", "generator", "split", "width", "height", "ext")
+T = TypeVar("T")
 
 
 class NpyFeatureCacheError(ValueError):
@@ -42,7 +48,7 @@ def cache_frequency_split(config: Mapping[str, Any], split: str) -> tuple[np.nda
 
     features: list[np.ndarray] = []
     labels: list[int] = []
-    for index in range(len(dataset)):
+    for index in _progress(range(len(dataset)), desc=f"Caching frequency {split}", total=len(dataset), unit="image"):
         image, label, _metadata = cast(tuple[Any, int, dict[str, str]], dataset[index])
         features.append(extract_frequency_feature(image, dict(config)))
         labels.append(int(label))
@@ -71,7 +77,7 @@ def cache_clip_split(config: Mapping[str, Any], split: str) -> tuple[np.ndarray,
     )
     features, labels, extracted_meta = extract_clip_features(
         model,
-        dataloader,
+        _progress(dataloader, desc=f"Caching CLIP {split}", total=len(dataloader), unit="batch"),
         device=device,
         normalize=_clip_normalize(config),
     )
@@ -295,6 +301,12 @@ def _clip_normalize(config: Mapping[str, Any]) -> bool:
     if isinstance(clip, Mapping):
         return bool(clip.get("normalize_feature", True))
     return True
+
+
+def _progress(iterable: Iterable[T], *, desc: str, unit: str, total: int | None = None) -> Iterable[T]:
+    if tqdm is None:
+        return iterable
+    return tqdm(iterable, desc=desc, total=total, unit=unit)
 
 
 def _validate_feature_type(feature_type: str) -> None:

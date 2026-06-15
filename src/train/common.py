@@ -1,25 +1,36 @@
 from __future__ import annotations
 
-# pyright: reportAny=false, reportMissingImports=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnusedCallResult=false
+# pyright: reportMissingImports=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportUnknownVariableType=false, reportUnusedCallResult=false
 
 import csv
 import json
 import math
 import warnings
 from dataclasses import dataclass
+from collections.abc import Iterable
 from pathlib import Path
-from typing import cast
+from typing import TypeVar, cast
 
+import joblib
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import StandardScaler
 
 from src.features.cache_features import NpyFeatureCacheError, cache_paths, load_feature_cache
 from src.models.checkpoint import save_checkpoint
 from src.models.mlp_classifier import MLPClassifier
 from src.utils.config import resolve_device
 from src.utils.seed import set_seed
+
+try:
+    from tqdm.auto import tqdm
+except ModuleNotFoundError:  # pragma: no cover - tqdm is a progress nicety
+    tqdm = None
+
+
+T = TypeVar("T")
 
 
 LOG_COLUMNS = [
@@ -58,6 +69,12 @@ def train_feature_mlp(config: dict[str, object], settings: TrainerSettings) -> T
 
     train_features, train_labels = _load_split(config, feature_type=settings.feature_type, split="train", optional_cache=settings.optional_cache)
     val_features, val_labels = _load_split(config, feature_type=settings.feature_type, split="val", optional_cache=settings.optional_cache)
+    checkpoint_config = dict(config)
+    if settings.feature_type == "frequency":
+        scaler, scaler_path = _fit_frequency_scaler(config, train_features)
+        train_features = cast(np.ndarray, scaler.transform(train_features)).astype(np.float32, copy=False)
+        val_features = cast(np.ndarray, scaler.transform(val_features)).astype(np.float32, copy=False)
+        checkpoint_config = _config_with_frequency_scaler(config, scaler_path)
     _validate_training_labels(train_labels, split="train")
 
     train_loader = _make_loader(train_features, train_labels, batch_size=_batch_size(config), shuffle=True, seed=seed)
@@ -82,11 +99,13 @@ def train_feature_mlp(config: dict[str, object], settings: TrainerSettings) -> T
     best_state: dict[str, torch.Tensor] | None = None
     epochs_without_improvement = 0
 
-    for epoch in range(1, _epochs(config) + 1):
+    epoch_iter = _progress_iter(range(1, _epochs(config) + 1), desc=f"Training {settings.artifact_stem}", unit="epoch")
+    for epoch in epoch_iter:
         train_loss = _train_one_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, metrics = _evaluate(model, val_loader, criterion, device, threshold=_threshold(config))
         score = _selection_score(val_loss, metrics["roc_auc"])
         rows.append(_log_row(epoch, train_loss, val_loss, metrics))
+        _set_progress_postfix(epoch_iter, train_loss=train_loss, val_loss=val_loss, val_accuracy=metrics["accuracy"], val_roc_auc=metrics["roc_auc"])
 
         if score > best_score:
             best_score = score
@@ -125,7 +144,7 @@ def train_feature_mlp(config: dict[str, object], settings: TrainerSettings) -> T
         hidden_dim=hidden_dim,
         threshold=_threshold(config),
         feature_type=settings.feature_type,
-        config_snapshot=config,
+        config_snapshot=checkpoint_config,
     )
 
     print(f"best_epoch={best_epoch}")
@@ -143,6 +162,28 @@ def train_feature_mlp(config: dict[str, object], settings: TrainerSettings) -> T
         best_val_loss=best_val_loss,
         best_val_roc_auc=best_val_roc_auc,
     )
+
+
+def _progress_iter(iterable: Iterable[T], *, desc: str, unit: str, total: int | None = None, leave: bool = True) -> Iterable[T]:
+    if tqdm is None:
+        return iterable
+    return tqdm(iterable, desc=desc, total=total, unit=unit, leave=leave)
+
+
+def _set_progress_postfix(progress: Iterable[object], **metrics: object) -> None:
+    set_postfix = getattr(progress, "set_postfix", None)
+    if set_postfix is None:
+        return
+    formatted = {key: _format_progress_value(value) for key, value in metrics.items()}
+    set_postfix(formatted)
+
+
+def _format_progress_value(value: object) -> object:
+    if isinstance(value, float):
+        return f"{value:.4f}" if math.isfinite(value) else str(value)
+    if value is None:
+        return "null"
+    return value
 
 
 def _load_split(config: dict[str, object], *, feature_type: str, split: str, optional_cache: bool) -> tuple[np.ndarray, np.ndarray]:
@@ -332,6 +373,37 @@ def _paths(config: dict[str, object]) -> dict[str, object]:
 def _checkpoint_path(config: dict[str, object], artifact_stem: str) -> Path:
     paths = _paths(config)
     return Path(str(paths.get("checkpoint_dir", "artifacts/checkpoints"))) / f"{artifact_stem}.pt"
+
+
+def _frequency_scaler_path(config: dict[str, object]) -> Path:
+    paths = _paths(config)
+    explicit = paths.get("frequency_scaler_path")
+    if explicit:
+        return Path(str(explicit))
+    scaler_dir = Path(str(paths.get("scaler_dir", "artifacts/scalers")))
+    return scaler_dir / "frequency_scaler.pkl"
+
+
+def _fit_frequency_scaler(config: dict[str, object], train_features: np.ndarray) -> tuple[StandardScaler, Path]:
+    scaler = StandardScaler()
+    scaler.fit(train_features.astype(np.float32, copy=False))
+    scaler_path = _frequency_scaler_path(config)
+    scaler_path.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(scaler, scaler_path)
+    return scaler, scaler_path
+
+
+def _config_with_frequency_scaler(config: dict[str, object], scaler_path: Path) -> dict[str, object]:
+    snapshot = dict(config)
+    raw_paths = snapshot.get("paths")
+    paths = dict(cast(dict[str, object], raw_paths)) if isinstance(raw_paths, dict) else {}
+    paths["frequency_scaler_path"] = scaler_path.as_posix()
+    snapshot["paths"] = paths
+    raw_frequency = snapshot.get("frequency")
+    frequency = dict(cast(dict[str, object], raw_frequency)) if isinstance(raw_frequency, dict) else {}
+    frequency["scaler"] = "standard"
+    snapshot["frequency"] = frequency
+    return snapshot
 
 
 def _report_path(config: dict[str, object], filename: str) -> Path:

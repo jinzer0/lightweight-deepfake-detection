@@ -15,7 +15,7 @@ from src.features.frequency_features import (
     image_to_grayscale_array,
     radial_average,
 )
-from src.visualization.radial_spectrum import save_radial_spectrum_plot
+from src.visualization.radial_spectrum import radial_spectrum_from_image, save_radial_spectrum_plot
 from src.visualization.spectrum import save_spectrum_image
 
 
@@ -109,3 +109,21 @@ def test_visualization_helpers_save_png_files(tiny_png: Path, tmp_path: Path) ->
     assert radial_path.is_file()
     assert spectrum_path.read_bytes().startswith(b"\x89PNG")
     assert radial_path.read_bytes().startswith(b"\x89PNG")
+
+
+def test_radial_visualization_feature_matches_inference_extractor(tiny_png: Path) -> None:
+    config = {
+        "frequency": {
+            "method": "fft",
+            "image_size": 32,
+            "radial_bins": 9,
+            "log_scale": True,
+            "normalize_feature": True,
+        }
+    }
+
+    inference_feature = extract_frequency_feature(tiny_png, config)
+    visualization_feature = radial_spectrum_from_image(tiny_png, config)
+
+    assert visualization_feature.shape == (9,)
+    np.testing.assert_allclose(visualization_feature, inference_feature)

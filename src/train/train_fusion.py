@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportAny=false, reportExplicitAny=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownParameterType=false, reportPrivateUsage=false, reportUnusedCallResult=false
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnknownParameterType=false, reportPrivateUsage=false, reportUnusedCallResult=false
 
 import argparse
 import math
@@ -20,9 +20,11 @@ from src.train.common import (
     TrainingArtifacts,
     _batch_size,
     _checkpoint_path,
+    _config_with_frequency_scaler,
     _dropout,
     _epochs,
     _evaluate,
+    _fit_frequency_scaler,
     _hidden_dim,
     _learning_rate,
     _log_row,
@@ -30,8 +32,10 @@ from src.train.common import (
     _optional_float,
     _patience,
     _project_seed,
+    _progress_iter,
     _report_path,
     _selection_score,
+    _set_progress_postfix,
     _threshold,
     _train_one_epoch,
     _validate_training_labels,
@@ -132,8 +136,15 @@ def train_fusion(config: dict[str, object]) -> TrainingArtifacts:
     _validate_split_feature_dims(train_table, val_table)
     _validate_training_labels(train_table.labels, split="train")
 
-    train_loader = _make_loader(train_table.features, train_table.labels, batch_size=_batch_size(config), shuffle=True, seed=seed)
-    val_loader = _make_loader(val_table.features, val_table.labels, batch_size=_batch_size(config), shuffle=False, seed=seed)
+    scaler, scaler_path = _fit_frequency_scaler(config, train_table.frequency_features)
+    train_frequency_features = cast(np.ndarray, scaler.transform(train_table.frequency_features)).astype(np.float32, copy=False)
+    val_frequency_features = cast(np.ndarray, scaler.transform(val_table.frequency_features)).astype(np.float32, copy=False)
+    train_features = np.concatenate([train_table.clip_features, train_frequency_features], axis=1).astype(np.float32, copy=False)
+    val_features = np.concatenate([val_table.clip_features, val_frequency_features], axis=1).astype(np.float32, copy=False)
+    checkpoint_config = _config_with_frequency_scaler(config, scaler_path)
+
+    train_loader = _make_loader(train_features, train_table.labels, batch_size=_batch_size(config), shuffle=True, seed=seed)
+    val_loader = _make_loader(val_features, val_table.labels, batch_size=_batch_size(config), shuffle=False, seed=seed)
 
     clip_dim = int(train_table.clip_features.shape[1])
     frequency_dim = int(train_table.frequency_features.shape[1])
@@ -154,11 +165,13 @@ def train_fusion(config: dict[str, object]) -> TrainingArtifacts:
     best_state: dict[str, torch.Tensor] | None = None
     epochs_without_improvement = 0
 
-    for epoch in range(1, _epochs(config) + 1):
+    epoch_iter = _progress_iter(range(1, _epochs(config) + 1), desc="Training fusion", unit="epoch")
+    for epoch in epoch_iter:
         train_loss = _train_one_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, metrics = _evaluate(model, val_loader, criterion, device, threshold=_threshold(config))
         score = _selection_score(val_loss, metrics["roc_auc"])
         rows.append(_log_row(epoch, train_loss, val_loss, metrics))
+        _set_progress_postfix(epoch_iter, train_loss=train_loss, val_loss=val_loss, val_accuracy=metrics["accuracy"], val_roc_auc=metrics["roc_auc"])
 
         if score > best_score:
             best_score = score
@@ -199,7 +212,7 @@ def train_fusion(config: dict[str, object]) -> TrainingArtifacts:
         hidden_dim=hidden_dim,
         threshold=_threshold(config),
         feature_type="fusion",
-        config_snapshot=config,
+        config_snapshot=checkpoint_config,
     )
 
     print(f"best_epoch={best_epoch}")

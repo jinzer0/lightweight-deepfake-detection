@@ -11,12 +11,18 @@ import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from collections.abc import Iterable
+from typing import Any, TypeVar, cast
 
 import numpy as np
 import yaml
 from PIL import Image, ImageOps
 from sklearn.metrics import accuracy_score, average_precision_score, precision_recall_fscore_support, roc_auc_score
+
+try:
+    from tqdm.auto import tqdm
+except ModuleNotFoundError:  # pragma: no cover - tqdm is a progress nicety
+    tqdm = None
 
 from _path import ensure_project_root_on_path
 
@@ -28,6 +34,7 @@ from src.data.manifest import read_manifest, validate_manifest_rows  # noqa: E40
 PREDICTION_COLUMNS = ["path", "sample_id", "label", "pred_label", "prob_fake", "score", "split"]
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -125,7 +132,7 @@ def run(args: argparse.Namespace) -> TrialResult:
     best_result: TrialResult | None = None
     best_state: dict[str, Any] | None = None
 
-    for trial in trial_configs:
+    for trial in _progress(trial_configs, desc="Fine-tune trials", unit="trial"):
         print(f"running {trial.trial_id}: {asdict(trial)}")
         module = _build_model(str(args.model_arch), trial.dropout, trial.unfreeze_last_n).to(device)
         optimizer = _optimizer(module, trial)
@@ -136,11 +143,12 @@ def run(args: argparse.Namespace) -> TrialResult:
         scaler = torch.amp.GradScaler("cuda", enabled=bool(args.amp and device == "cuda"))
         trial_best: TrialResult | None = None
         trial_best_state: dict[str, Any] | None = None
-        for epoch in range(1, trial.epochs + 1):
-            train_loss = _train_epoch(module, train_loader, optimizer, criterion, scaler, device, bool(args.amp))
-            val_prediction = _predict(module, val_loader, device, bool(args.amp))
+        epoch_iter = _progress(range(1, trial.epochs + 1), desc=f"{trial.trial_id} epochs", unit="epoch")
+        for epoch in epoch_iter:
+            train_loss = _train_epoch(module, train_loader, optimizer, criterion, scaler, device, bool(args.amp), desc=f"{trial.trial_id} train e{epoch}")
+            val_prediction = _predict(module, val_loader, device, bool(args.amp), desc=f"{trial.trial_id} val e{epoch}")
             threshold = _best_threshold(val_prediction["labels"], val_prediction["prob_fake"])
-            test_prediction = _predict(module, test_loader, device, bool(args.amp))
+            test_prediction = _predict(module, test_loader, device, bool(args.amp), desc=f"{trial.trial_id} test e{epoch}")
             val_metrics = _single_metrics(val_prediction["labels"], val_prediction["prob_fake"], threshold)
             test_metrics = _single_metrics(test_prediction["labels"], test_prediction["prob_fake"], threshold)
             candidate = TrialResult(
@@ -155,6 +163,7 @@ def run(args: argparse.Namespace) -> TrialResult:
                 train_loss=train_loss,
                 config=trial,
             )
+            _set_progress_postfix(epoch_iter, loss=train_loss, val_acc=candidate.val_accuracy, val_auc=candidate.val_roc_auc, test_acc=candidate.test_accuracy)
             print(f"{trial.trial_id} epoch={epoch} loss={train_loss:.6f} val_acc={candidate.val_accuracy:.6f} val_auc={candidate.val_roc_auc:.6f} test_acc={candidate.test_accuracy:.6f}")
             if trial_best is None or _is_better(candidate, trial_best):
                 trial_best = candidate
@@ -170,11 +179,30 @@ def run(args: argparse.Namespace) -> TrialResult:
         raise RuntimeError("no hyperparameter trial completed")
     module = _build_model(str(args.model_arch), best_result.config.dropout, best_result.config.unfreeze_last_n).to(device)
     module.load_state_dict(best_state)
-    all_prediction = _predict(module, _loader(rows, int(args.image_size), best_result.config.batch_size, False, int(args.num_workers)), device, bool(args.amp))
+    all_prediction = _predict(module, _loader(rows, int(args.image_size), best_result.config.batch_size, False, int(args.num_workers)), device, bool(args.amp), desc="Predict all splits")
     predictions = _prediction_rows(rows, all_prediction, best_result.threshold)
     metrics = _metrics_by_split(rows, all_prediction, best_result.threshold)
     _write_outputs(args, best_result, all_results, metrics, predictions, best_state, device)
     return best_result
+
+
+def _progress(iterable: Iterable[T], *, desc: str, unit: str, total: int | None = None, leave: bool = True) -> Iterable[T]:
+    if tqdm is None:
+        return iterable
+    return tqdm(iterable, desc=desc, total=total, unit=unit, leave=leave)
+
+
+def _set_progress_postfix(progress: Iterable[object], **metrics: object) -> None:
+    set_postfix = getattr(progress, "set_postfix", None)
+    if set_postfix is None:
+        return
+    set_postfix({key: _format_progress_value(value) for key, value in metrics.items()})
+
+
+def _format_progress_value(value: object) -> object:
+    if isinstance(value, float):
+        return f"{value:.4f}"
+    return value
 
 
 def _build_model(model_arch: str, dropout: float, unfreeze_last_n: int) -> Any:
@@ -217,12 +245,12 @@ def _optimizer(module: Any, trial: TrialConfig) -> Any:
     return torch.optim.AdamW(groups, weight_decay=trial.weight_decay)
 
 
-def _train_epoch(module: Any, loader: Any, optimizer: Any, criterion: Any, scaler: Any, device: str, amp: bool) -> float:
+def _train_epoch(module: Any, loader: Any, optimizer: Any, criterion: Any, scaler: Any, device: str, amp: bool, *, desc: str) -> float:
     torch = _torch()
     module.train()
     total_loss = 0.0
     total = 0
-    for images, labels, *_ in loader:
+    for images, labels, *_ in _progress(loader, desc=desc, total=len(loader), unit="batch", leave=False):
         images = images.to(device, non_blocking=True)
         labels = labels.to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
@@ -238,7 +266,7 @@ def _train_epoch(module: Any, loader: Any, optimizer: Any, criterion: Any, scale
     return total_loss / max(total, 1)
 
 
-def _predict(module: Any, loader: Any, device: str, amp: bool) -> dict[str, np.ndarray | list[str]]:
+def _predict(module: Any, loader: Any, device: str, amp: bool, *, desc: str) -> dict[str, np.ndarray | list[str]]:
     torch = _torch()
     module.eval()
     labels: list[np.ndarray] = []
@@ -247,7 +275,7 @@ def _predict(module: Any, loader: Any, device: str, amp: bool) -> dict[str, np.n
     paths: list[str] = []
     splits: list[str] = []
     with torch.no_grad():
-        for images, batch_labels, batch_sample_ids, batch_paths, batch_splits in loader:
+        for images, batch_labels, batch_sample_ids, batch_paths, batch_splits in _progress(loader, desc=desc, total=len(loader), unit="batch", leave=False):
             images = images.to(device, non_blocking=True)
             with torch.amp.autocast(device_type=device, enabled=amp and device == "cuda"):
                 logits = module(images).squeeze(-1)
