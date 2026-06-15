@@ -202,7 +202,7 @@ def _validate_frequency_predictor(model: Any, transformers: dict[str, Any], conf
 
 def _extract_frequency_vector(image: Any, config: dict[str, Any]) -> np.ndarray:
     metadata = config["feature"]["branches"]["frequency"].get("metadata", {})
-    image_size = int(metadata.get("image_size", 224))
+    image_size = int(metadata.get("image_size", 512))
     radial_bins = int(metadata.get("radial_bins", DEFAULT_RADIAL_BINS))
     fft_epsilon = float(metadata.get("fft_epsilon", DEFAULT_FFT_EPSILON))
     features = np.asarray(

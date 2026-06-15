@@ -210,7 +210,7 @@ def write_final_report(output_path: str | Path, experiments: list[ExperimentAudi
     lines.extend([
         "",
         "## Next Improvements",
-        "- Collect real full CIFAKE, CLIP, and remote CUDA evidence before claiming those runs as complete.",
+        "- Collect real full GenImage, CLIP, and remote CUDA evidence before claiming those runs as complete.",
         "- Add calibrated probability support before making score-only models Streamlit probability eligible.",
         "- Expand robustness beyond quick frequency-only checks when compute and data are available.",
         "",
@@ -223,7 +223,7 @@ def _implemented_items(
     model_types: list[str], feature_types: list[str], streamlit_eligible: list[str], robustness: RobustnessAudit | None
 ) -> list[str]:
     items = [
-        "local CIFAKE-style manifest preparation and validation",
+        "local real/fake manifest preparation and validation",
         "frequency FFT/DCT feature extraction with cache validation",
         "openCLIP feature extraction path when model/cache access is available",
         "classifier training, reload checks, metrics, predictions, and plot artifacts",
@@ -246,7 +246,7 @@ def _deferred_items() -> list[str]:
         "Phase C MLP decision and implementation remain deferred",
         "HF loader schema confirmation remains deferred",
         "RBF/UMAP/advanced peak features remain deferred",
-        "GenImage full download and external dataset claims remain deferred",
+        "external dataset generalization claims remain deferred",
         "polished Streamlit selector enhancements remain deferred",
     ]
 

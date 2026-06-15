@@ -69,3 +69,20 @@ def roc_auc_score_binary(labels: np.ndarray, scores: np.ndarray) -> float | None
     positive_rank_sum = float(np.sum(ranks[labels == 1]))
     auc = (positive_rank_sum - positives * (positives + 1) / 2.0) / (positives * negatives)
     return float(auc) if math.isfinite(auc) else None
+
+
+
+def average_precision_score_binary(labels: np.ndarray, scores: np.ndarray) -> float | None:
+    y = np.asarray(labels, dtype=np.int64)
+    s = np.asarray(scores, dtype=np.float64)
+    positives = int(np.sum(y == 1))
+    if positives == 0:
+        warnings.warn("Average precision is undefined because no positive class is present; writing null", RuntimeWarning, stacklevel=2)
+        return None
+    order = np.argsort(-s, kind="mergesort")
+    sorted_labels = y[order]
+    tp = np.cumsum(sorted_labels == 1)
+    fp = np.cumsum(sorted_labels == 0)
+    precision = tp / np.maximum(tp + fp, 1)
+    recall_step = (sorted_labels == 1).astype(np.float64) / positives
+    return float(np.sum(precision * recall_step))

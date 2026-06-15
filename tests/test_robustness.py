@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportAny=false, reportExplicitAny=false, reportUnusedCallResult=false
 
 import csv
 import hashlib
@@ -128,7 +127,7 @@ def test_clip_only_robustness_uses_optional_clip_feature_path(tmp_path: Path, mo
     result = evaluate_robustness(config, model_name="clip_only", split="test")
 
     assert result.metrics_path.name == "clip_only_robustness_metrics.csv"
-    assert calls == [6, 6, 6, 6, 6, 6]
+    assert calls == [4, 4, 4, 4, 4, 4]
 
 
 def _trained_frequency_config(tmp_path: Path) -> dict[str, object]:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# pyright: reportAny=false, reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportExplicitAny=false, reportUnusedCallResult=false
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnusedCallResult=false
 
 import argparse
 import csv
@@ -8,7 +8,9 @@ import io
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, cast, override
+from typing import Any, Literal, cast
+
+from typing_extensions import override
 
 import numpy as np
 import torch
@@ -159,7 +161,7 @@ def run_frequency_robustness(
             "checkpoint_dir": "artifacts/checkpoints",
             "report_dir": str(output_dir or Path("artifacts") / "reports"),
         },
-        "frequency": {"method": "dct", "image_size": 224, "radial_bins": 64, "log_scale": True, "normalize_feature": True},
+        "frequency": {"method": "dct", "image_size": 512, "radial_bins": 64, "log_scale": True, "normalize_feature": True},
         "robustness": {"jpeg_qualities": [75], "resize_scales": [0.5], "blur_sigmas": [1.0]},
     }
     return evaluate_robustness(config, model_name="frequency_only", split="test")

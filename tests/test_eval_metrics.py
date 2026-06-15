@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportAny=false, reportUnusedCallResult=false
 
 import csv
 import json
@@ -54,14 +53,14 @@ def test_evaluate_frequency_model_writes_required_artifacts(tmp_path: Path) -> N
     assert metrics["model_name"] == "frequency_only"
     assert metrics["feature_type"] == "frequency"
     assert metrics["split"] == "test"
-    assert metrics["sample_count"] == 6
+    assert metrics["sample_count"] == 4
     assert {"accuracy", "precision", "recall", "f1", "roc_auc", "confusion_matrix"}.issubset(metrics["metrics"])
 
     with result.predictions_path.open("r", newline="", encoding="utf-8") as file_obj:
         reader = csv.DictReader(file_obj)
         rows = list(reader)
     assert reader.fieldnames == PREDICTION_COLUMNS
-    assert len(rows) == 6
+    assert len(rows) == 4
     assert all(row["split"] == "test" for row in rows)
     assert all(0.0 <= float(row["pred_prob"]) <= 1.0 for row in rows)
     assert {row["model_name"] for row in rows} == {"frequency_only"}

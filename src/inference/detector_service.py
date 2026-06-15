@@ -249,7 +249,7 @@ def _image_size(config: Mapping[str, object]) -> int:
     data = config.get("data")
     if isinstance(data, Mapping) and "image_size" in data:
         return int(data["image_size"])
-    return int(_frequency_settings(config).get("image_size", 224))
+    return int(_frequency_settings(config).get("image_size", 512))
 
 
 def _clip_normalize(config: Mapping[str, object]) -> bool:

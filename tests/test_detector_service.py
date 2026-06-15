@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportAny=false, reportUnknownLambdaType=false, reportUnusedCallResult=false, reportExplicitAny=false
 
 import json
 from pathlib import Path
@@ -8,6 +7,7 @@ from typing import Any
 
 import pytest
 import torch
+from PIL import Image
 
 from src.inference.detector_service import DetectorService
 from src.models.checkpoint import save_checkpoint
@@ -136,3 +136,33 @@ class _FakeClipModel:
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
         return torch.ones((int(images.shape[0]), 4), dtype=torch.float32, device=images.device)
+
+
+def test_demo_detector_service_loads_current_frequency_checkpoint(tmp_path: Path) -> None:
+    import yaml
+    from src.demo.detector_service import DetectorService
+    from src.models.checkpoint import save_checkpoint
+    from src.models.mlp_classifier import MLPClassifier
+
+    checkpoint_dir = tmp_path / "checkpoints"
+    model = MLPClassifier(input_dim=140, hidden_dim=4, dropout=0.0)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.fill_(0.05)
+    save_checkpoint(
+        checkpoint_dir / "frequency_only.pt",
+        model_state_dict=model.state_dict(),
+        model_name="MLPClassifier",
+        input_dim=140,
+        hidden_dim=4,
+        threshold=0.5,
+        feature_type="frequency",
+        config_snapshot={},
+    )
+    config_path = tmp_path / "fusion.yaml"
+    config_path.write_text(yaml.safe_dump({"paths": {"checkpoint_dir": str(checkpoint_dir / "frequency_only")}, "data": {"image_size": 32}}), encoding="utf-8")
+
+    result = DetectorService(str(config_path)).predict(Image.new("RGB", (32, 32), (10, 20, 30)))
+
+    assert result["status"] == "ok"
+    assert result["frequency_prob"] != 0.5
