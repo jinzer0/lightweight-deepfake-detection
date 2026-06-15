@@ -18,13 +18,13 @@ from src.utils.image_io import DEFAULT_FREQUENCY_IMAGE_SIZE
 SUPPORTED_METHODS = ("dct", "fft")
 
 
-def save_spectrum_image(image: Any, output_path: str, method: str = "dct") -> str:
+def save_spectrum_image(image: Any, output_path: str, method: str = "dct", *, image_size: int = DEFAULT_FREQUENCY_IMAGE_SIZE) -> str:
     selected_method = method.lower()
     if selected_method not in SUPPORTED_METHODS:
         supported = ", ".join(SUPPORTED_METHODS)
         raise ValueError(f"Unsupported frequency method '{selected_method}'. Supported methods: {supported}.")
 
-    gray = image_to_grayscale_array(image, image_size=DEFAULT_FREQUENCY_IMAGE_SIZE)
+    gray = image_to_grayscale_array(image, image_size=int(image_size))
     spectrum = compute_dct_spectrum(gray) if selected_method == "dct" else compute_fft_spectrum(gray)
     log_spectrum = np.log1p(spectrum)
 

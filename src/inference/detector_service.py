@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportAny=false, reportExplicitAny=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnannotatedClassAttribute=false, reportUnusedCallResult=false, reportOptionalMemberAccess=false, reportArgumentType=false
+# pyright: reportMissingImports=false, reportMissingTypeStubs=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnusedCallResult=false, reportOptionalMemberAccess=false, reportArgumentType=false
 
 import re
 import uuid
@@ -13,15 +13,14 @@ import numpy as np
 import torch
 from torch import nn
 
-from src.data.transforms import get_eval_transform
-from src.features.clip_features import l2_normalize, load_clip_model
+from src.features.clip_features import l2_normalize, load_clip_model_and_preprocess
 from src.features.frequency_features import extract_frequency_feature
 from src.models.checkpoint import CheckpointError, load_checkpoint
 from src.models.fusion_classifier import FusionClassifier
 from src.models.mlp_classifier import MLPClassifier
 from src.utils.config import load_config, resolve_device
 from src.utils.image_io import CorruptImageError, load_rgb_image
-from src.visualization.radial_spectrum import save_radial_spectrum_plot
+from src.visualization.radial_spectrum import radial_spectrum_from_image, save_radial_spectrum_plot
 from src.visualization.spectrum import save_spectrum_image
 
 
@@ -58,6 +57,7 @@ class DetectorService:
         self.figure_dir = _path_from_config(self.config, "figure_dir", "artifacts/figures")
         self.model, self.threshold = self._load_selected_model(model_name)
         self._clip_model: Any | None = None
+        self._clip_preprocess: Any | None = None
 
     def predict(self, image_path: str | Path) -> dict[str, float | str | None]:
         path = Path(image_path)
@@ -133,13 +133,16 @@ class DetectorService:
         return feature
 
     def _extract_clip_feature(self, image: Any) -> np.ndarray:
-        if self._clip_model is None:
-            self._clip_model = load_clip_model(self.config, device=self.device)
-        transform = get_eval_transform(_image_size(self.config))
-        tensor = transform(image).unsqueeze(0).to(self.device)
-        self._clip_model.eval()
+        if self._clip_model is None or self._clip_preprocess is None:
+            self._clip_model, self._clip_preprocess = load_clip_model_and_preprocess(self.config, device=self.device)
+        clip_model = self._clip_model
+        clip_preprocess = self._clip_preprocess
+        if clip_model is None or clip_preprocess is None:
+            raise DetectorServiceError("CLIP model or preprocess was not loaded")
+        tensor = clip_preprocess(image).unsqueeze(0).to(self.device)
+        clip_model.eval()
         with torch.inference_mode():
-            encoded = self._clip_model.encode_image(tensor)
+            encoded = clip_model.encode_image(tensor)
         feature = encoded.detach().cpu().numpy().astype(np.float32, copy=False)
         if _clip_normalize(self.config):
             feature = l2_normalize(feature)
@@ -193,9 +196,26 @@ class DetectorService:
         token = uuid.uuid4().hex[:12]
         spectrum_path = self.figure_dir / f"{stem}_{token}_spectrum.png"
         radial_path = self.figure_dir / f"{stem}_{token}_radial.png"
-        method = str(_frequency_settings(self.config).get("method", "dct"))
-        saved_spectrum = save_spectrum_image(image, spectrum_path.as_posix(), method=method)
-        saved_radial = save_radial_spectrum_plot(frequency_feature, radial_path.as_posix())
+        frequency_settings = _frequency_settings(self.config)
+        method = str(frequency_settings.get("method", "dct"))
+        image_size = int(frequency_settings.get("image_size", _image_size(self.config)))
+        radial_spectrum = radial_spectrum_from_image(image, self.config)
+        if radial_spectrum.shape != frequency_feature.shape:
+            raise DetectorServiceError(
+                f"radial visualization shape must match inference frequency feature shape {frequency_feature.shape}, "
+                f"got {radial_spectrum.shape}"
+            )
+        if not np.allclose(radial_spectrum, frequency_feature, rtol=1e-5, atol=1e-6):
+            raise DetectorServiceError("radial visualization values diverged from the inference frequency feature")
+
+        saved_spectrum = save_spectrum_image(image, spectrum_path.as_posix(), method=method, image_size=image_size)
+        saved_radial = save_radial_spectrum_plot(
+            radial_spectrum,
+            radial_path.as_posix(),
+            method=method,
+            log_scale=bool(frequency_settings.get("log_scale", False)),
+            normalize_feature=bool(frequency_settings.get("normalize_feature", False)),
+        )
         return saved_spectrum, saved_radial
 
     def _confidence(self, ai_prob: float) -> str:
@@ -209,6 +229,11 @@ class DetectorService:
             return "medium"
         return "low"
 
+
+
+def load_clip_model(config: Mapping[str, object], device: torch.device) -> Any:
+    """Compatibility wrapper for tests and older integrations that monkeypatch CLIP loading."""
+    return load_clip_model_and_preprocess(config, device=device)
 
 def _load_image(path: Path) -> Any:
     if not path.is_file():

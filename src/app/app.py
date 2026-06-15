@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-# pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportAny=false, reportUnusedCallResult=false
+# pyright: reportMissingImports=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportUnknownVariableType=false, reportUnusedCallResult=false
 
 import re
 import sys
 import uuid
+from html import escape
 from pathlib import Path
 from typing import Protocol
 
@@ -21,8 +22,18 @@ from src.inference.detector_service import DetectorService  # noqa: E402
 CONFIG_PATH = Path("configs/default.yaml")
 UPLOAD_TYPES = ("jpg", "jpeg", "png")
 UPLOAD_DIR = Path("artifacts/figures/uploads")
-LIMITATION_TEXT = "이 결과는 제한된 데이터셋 기준의 탐지 결과이며, 모든 AI 생성 이미지를 완벽하게 판별한다는 의미는 아닙니다."
+LIMITATION_TEXT = "This result is a reference estimate from a limited dataset, not a guarantee that every AI-generated image can be detected."
 MODEL_OPTIONS = ("frequency_only", "clip_only", "fusion")
+MODEL_LABELS = {
+    "frequency_only": "Fast texture check",
+    "clip_only": "Visual similarity check",
+    "fusion": "Balanced combined check",
+}
+MODEL_DESCRIPTIONS = {
+    "frequency_only": "A quick scan focused on image texture patterns.",
+    "clip_only": "A visual-language scan for broader image cues.",
+    "fusion": "A combined scan that weighs multiple detector signals.",
+}
 
 
 class UploadedImage(Protocol):
@@ -39,39 +50,97 @@ def main() -> None:
     st.markdown(
         """
         <section class="hero-card">
-          <p class="eyebrow">Single-image detector demo</p>
-          <h1>AI-Generated Image Detector</h1>
-          <p class="lede">Upload one image and run it through the shared DetectorService boundary.</p>
+          <h1>AI-GEN Image Detection model</h1>
         </section>
         """,
         unsafe_allow_html=True,
     )
-    st.warning(LIMITATION_TEXT)
+    if LIMITATION_TEXT:
+        st.info(LIMITATION_TEXT)
 
-    with st.sidebar:
-        st.header("Prediction setup")
-        model_name = st.selectbox(
-            "Model checkpoint",
-            options=MODEL_OPTIONS,
-            index=0,
-            help="frequency_only is the default CPU-safe path. CLIP and fusion require their own checkpoints and CLIP runtime path.",
+    with st.container(border=True):
+        st.markdown(
+            """
+            <section class="flow-heading">
+              <p class="eyebrow">Start here</p>
+              <h2>Upload and analyze in one step</h2>
+              <p>Keep the default option for the quickest review, or choose a broader check before analyzing.</p>
+            </section>
+            """,
+            unsafe_allow_html=True,
         )
-        st.caption("Config: `configs/default.yaml`")
 
-    upload_column, result_column = st.columns([0.95, 1.05], gap="large")
-    with upload_column:
-        st.subheader("Image upload")
-        uploaded_file = st.file_uploader("Upload JPG, JPEG, or PNG image", type=UPLOAD_TYPES, accept_multiple_files=False)
-        if uploaded_file is not None:
-            st.image(uploaded_file, caption="Uploaded image", width="stretch")
+        action_column, preview_column = st.columns([1, 1], gap="large")
+        with action_column:
+            model_name = st.selectbox(
+                "Review style",
+                options=MODEL_OPTIONS,
+                index=0,
+                format_func=_model_label,
+                help="Choose the kind of review to run. Some options may take longer depending on this app's setup.",
+            )
+            st.caption(MODEL_DESCRIPTIONS[str(model_name)])
 
-    with result_column:
-        st.subheader("Prediction")
-        if uploaded_file is None:
-            st.info("Upload a single JPG, JPEG, or PNG image to run the detector.")
-            return
-        if st.button("Run detection", type="primary", width="stretch"):
-            _run_prediction(uploaded_file, str(model_name))
+            uploaded_file = st.file_uploader("Choose an image", type=UPLOAD_TYPES, accept_multiple_files=False)
+            st.caption("Supported formats: JPG, JPEG, PNG.")
+
+            analyze_clicked = st.button(
+                "Analyze image",
+                type="primary",
+                width="stretch",
+                disabled=uploaded_file is None,
+            )
+
+        with preview_column:
+            if uploaded_file is None:
+                st.markdown(
+                    """
+                    <section class="empty-state">
+                      <strong>No image selected yet</strong>
+                      <p>Upload one image to preview it here, then run the analysis from the button beside it.</p>
+                    </section>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.image(uploaded_file, caption="Selected image", width="stretch")
+
+    st.markdown(
+        """
+        <section class="section-heading section-heading--results">
+          <p class="eyebrow">Results</p>
+          <h2>Your image report</h2>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
+    if uploaded_file is None:
+        st.markdown(
+            """
+            <section class="empty-state empty-state--wide">
+              <strong>Waiting for an image</strong>
+              <p>Your result will appear here after you choose an image and start the analysis.</p>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+        return
+    if analyze_clicked:
+        _run_prediction(uploaded_file, str(model_name))
+    else:
+        st.markdown(
+            """
+            <section class="empty-state empty-state--wide">
+              <strong>Ready when you are</strong>
+              <p>Use the analyze button above to generate the image report.</p>
+            </section>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def _model_label(model_name: str) -> str:
+    return MODEL_LABELS[model_name]
 
 
 def _run_prediction(uploaded_file: UploadedImage, model_name: str) -> None:
@@ -85,7 +154,6 @@ def _run_prediction(uploaded_file: UploadedImage, model_name: str) -> None:
 
     _display_scores(result)
     _display_visualizations(result)
-    st.caption(f"Saved upload: `{image_path.as_posix()}`")
 
 
 def _save_upload(uploaded_file: UploadedImage) -> Path:
@@ -116,46 +184,70 @@ def _display_scores(result: dict[str, float | str | None]) -> None:
     ai_prob = _as_float(result["ai_prob"])
     confidence = str(result["confidence"])
     final_decision = "AI-generated" if str(result["pred_label"]) == "AI" else "Real"
+    result_class = "result-summary--ai" if final_decision == "AI-generated" else "result-summary--real"
+
+    st.markdown(
+        f"""
+        <section class="result-summary {result_class}">
+          <p class="eyebrow">Result summary</p>
+          <h2>{escape(final_decision)}</h2>
+          <p>AI-generated likelihood {escape(_format_score(ai_prob))} · {escape(confidence)} confidence</p>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
     primary_columns = st.columns(3)
-    primary_columns[0].metric("AI-generated probability", _format_score(ai_prob))
+    primary_columns[0].metric("AI-generated likelihood", _format_score(ai_prob))
     primary_columns[1].metric("Final decision", final_decision)
     primary_columns[2].metric("Confidence level", confidence)
 
+    st.markdown('<p class="metric-group-label">Supporting signals</p>', unsafe_allow_html=True)
     branch_columns = st.columns(3)
-    branch_columns[0].metric("CLIP branch score", _format_optional_score(result["clip_score"]))
-    branch_columns[1].metric("Frequency branch score", _format_optional_score(result["frequency_score"]))
-    branch_columns[2].metric("Fusion score", _format_optional_score(result["fusion_score"]))
+    branch_columns[0].metric("Visual similarity signal", _format_optional_score(result["clip_score"]))
+    branch_columns[1].metric("Texture signal", _format_optional_score(result["frequency_score"]))
+    branch_columns[2].metric("Combined signal", _format_optional_score(result["fusion_score"]))
 
 
 def _display_visualizations(result: dict[str, float | str | None]) -> None:
     spectrum_path = result["spectrum_path"]
     radial_path = result["radial_spectrum_path"]
+    st.divider()
+    st.markdown(
+        """
+        <section class="section-heading section-heading--compact">
+          <p class="eyebrow">Optional visual evidence</p>
+          <h2>Texture views</h2>
+          <p>These views can help explain texture patterns when the detector produces them.</p>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
     viz_columns = st.columns(2, gap="large")
     with viz_columns[0]:
-        st.subheader("DCT/FFT spectrum visualization")
+        st.subheader("DCT/FFT spectrum")
         _display_image_path(spectrum_path)
     with viz_columns[1]:
-        st.subheader("Radial spectrum graph")
+        st.subheader("Radial spectrum")
         _display_image_path(radial_path)
 
 
 def _display_image_path(path_value: float | str | None) -> None:
     if not isinstance(path_value, str) or not path_value:
-        st.info("Visualization unavailable/not generated.")
+        st.info("This view is not available for the selected review.")
         return
     image_path = Path(path_value)
     if not image_path.is_absolute():
         image_path = PROJECT_ROOT / image_path
     if not image_path.is_file():
-        st.info(f"Visualization unavailable/not generated: `{path_value}`")
+        st.info("This view is not available for the selected review.")
         return
     st.image(image_path.as_posix(), width="stretch")
 
 
 def _format_optional_score(value: float | str | None) -> str:
     if value is None:
-        return "Unavailable/not generated"
+        return "Not available"
     return _format_score(_as_float(value))
 
 
@@ -170,26 +262,20 @@ def _as_float(value: float | str | None) -> float:
 
 
 def _actionable_error(exc: Exception, model_name: str) -> str:
-    message = str(exc)
-    lowered = message.lower()
+    lowered = str(exc).lower()
+    selected_review = _model_label(model_name)
     if isinstance(exc, FileNotFoundError) and "config" in lowered:
-        return f"Config file is missing or unreadable: {message}. Restore configs/default.yaml, then retry."
+        return "This app is missing a required setup file. Ask the maintainer to check the app setup."
     if isinstance(exc, FileNotFoundError) or "checkpoint" in lowered or ".pt" in lowered:
         return (
-            f"Required checkpoint for `{model_name}` is missing or invalid. "
-            f"Create the default frequency-only checkpoint with `{_target_command()}`. Details: {message}"
+            f"The selected review, {selected_review}, is not ready yet. "
+            "Ask the maintainer to install the required model files."
         )
     if "open_clip" in lowered or "clip" in lowered:
-        return f"The selected CLIP-dependent path is unavailable. Use `frequency_only` unless CLIP dependencies and checkpoints are ready. Details: {message}"
+        return f"The selected review, {selected_review}, is unavailable in this app setup. Try Fast texture check."
     if "decode" in lowered or "image" in lowered:
-        return f"Uploaded content could not be decoded as a JPG, JPEG, or PNG image. Details: {message}"
-    return f"Prediction failed. Details: {message}"
-
-
-def _target_command() -> str:
-    word = "tra" + "in"
-    module_name = ".".join(("src", word, word + "_frequency"))
-    return f"python -m {module_name} --config configs/default.yaml"
+        return "Uploaded content could not be decoded as a JPG, JPEG, or PNG image."
+    return "Prediction failed. Try another image or ask the maintainer to check the app setup."
 
 
 def _apply_design_tokens() -> None:
@@ -197,103 +283,285 @@ def _apply_design_tokens() -> None:
         """
         <style>
         :root {
-          --detector-ink: #1c1915;
-          --detector-muted: #6e6458;
-          --detector-paper: #f5efe4;
-          --detector-panel: #fffaf0;
-          --detector-haze: #eadfc9;
-          --detector-cream: #f8f2e8;
-          --detector-line: #d8c9ae;
-          --detector-accent: #c84d2f;
-          --detector-accent-dark: #81331f;
-          --detector-soil-rgb: 56 43 27;
-          --detector-accent-rgb: 200 77 47;
-          --detector-panel-rgb: 255 250 240;
-          --detector-warm-rgb: 244 230 207;
-          --detector-accent-dark-rgb: 129 51 31;
-          --detector-shadow: 0 24px 70px rgb(var(--detector-soil-rgb) / 0.16);
+          --detector-ink: #20201d;
+          --detector-muted: #514d46;
+          --detector-soft: #5f5a52;
+          --detector-paper: #f7f5f0;
+          --detector-paper-alt: #efede6;
+          --detector-panel: #fffdf8;
+          --detector-panel-muted: #f3f0e8;
+          --detector-line: #ded8cc;
+          --detector-line-strong: #c8c0b2;
+          --detector-accent: #344a40;
+          --detector-accent-hover: #24352d;
+          --detector-accent-soft: #dce6df;
+          --detector-accent-ink: #1f332a;
+          --detector-focus: #0f5132;
+          --detector-button-text: #fffaf0;
+          --detector-button-disabled-bg: #d8d1c4;
+          --detector-button-disabled-text: #514d46;
+          --detector-button-disabled-border: #b8ae9f;
+          --detector-warning: #5f4711;
+          --detector-warning-soft: #f4ead4;
+          --detector-danger-soft: #f1ded8;
+          --detector-danger-ink: #7a3c2f;
+          --detector-success-soft: #dfe9df;
+          --detector-success-ink: #35543b;
+          --detector-ink-rgb: 32 32 29;
+          --detector-panel-rgb: 255 253 248;
+          --detector-accent-rgb: 52 74 64;
+          --detector-border-width: 1px;
+          --detector-shadow-sm: 0 0.5rem 1.5rem rgb(var(--detector-ink-rgb) / 0.05);
+          --detector-shadow-md: 0 1rem 2.75rem rgb(var(--detector-ink-rgb) / 0.08);
+          --detector-space-2xs: 0.25rem;
           --detector-space-xs: 0.5rem;
           --detector-space-sm: 0.75rem;
           --detector-space-md: 1rem;
           --detector-space-lg: 1.5rem;
           --detector-space-xl: 2rem;
-          --detector-radius-md: 1rem;
-          --detector-radius-lg: 1.5rem;
+          --detector-space-2xl: 3rem;
+          --detector-radius-sm: 0.625rem;
+          --detector-radius-md: 0.875rem;
+          --detector-radius-lg: 1.25rem;
+          --detector-radius-pill: 999px;
+          --detector-font-body: 'Aptos', 'IBM Plex Sans', 'Segoe UI', sans-serif;
+          --detector-font-display: 'Iowan Old Style', 'Charter', Georgia, serif;
+          --detector-text-xs: 0.78rem;
+          --detector-text-sm: 0.92rem;
+          --detector-text-md: 1rem;
+          --detector-text-lg: 1.08rem;
+          --detector-text-xl: 1.35rem;
+          --detector-text-display: clamp(2.4rem, 5vw, 4.6rem);
+          --detector-text-result: clamp(2rem, 4vw, 3.4rem);
+          --detector-leading-tight: 0.98;
+          --detector-leading-body: 1.65;
+          --detector-tracking-tight: -0.03em;
+          --detector-tracking-tighter: -0.045em;
+          --detector-tracking-slight: 0.02em;
+          --detector-tracking-wide: 0.1em;
+          --detector-tracking-wider: 0.12em;
+          --detector-weight-bold: 700;
+          --detector-lift: -0.0625rem;
+          --detector-transition: 160ms ease;
+          --detector-max-width: 76rem;
+          --detector-max-width-hero: 54rem;
+          --detector-max-width-copy: 44rem;
         }
         .stApp {
           color: var(--detector-ink);
-          background:
-            radial-gradient(circle at 14% 8%, rgb(var(--detector-accent-rgb) / 0.18), transparent 31rem),
-            radial-gradient(circle at 92% 18%, rgb(var(--detector-panel-rgb) / 0.72), transparent 28rem),
-            linear-gradient(135deg, var(--detector-paper), var(--detector-haze) 48%, var(--detector-cream));
+          background: linear-gradient(180deg, var(--detector-paper), var(--detector-paper-alt));
+          font-family: var(--detector-font-body);
         }
         .block-container {
-          padding-top: var(--detector-space-xl);
-          padding-bottom: var(--detector-space-xl);
+          max-width: var(--detector-max-width);
+          padding-top: var(--detector-space-2xl);
+          padding-bottom: var(--detector-space-2xl);
+        }
+        h1, h2, h3, [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
+          color: var(--detector-ink);
+          font-family: var(--detector-font-display);
+          letter-spacing: var(--detector-tracking-tight);
+        }
+        p, label, span, div[data-testid="stMarkdownContainer"] {
+          font-family: var(--detector-font-body);
         }
         .hero-card {
-          position: relative;
-          overflow: hidden;
-          border: 1px solid var(--detector-line);
+          border: var(--detector-border-width) solid var(--detector-line);
           border-radius: var(--detector-radius-lg);
-          padding: var(--detector-space-xl);
+          padding: var(--detector-space-2xl);
           margin-bottom: var(--detector-space-lg);
-          background: linear-gradient(140deg, rgb(var(--detector-panel-rgb) / 0.92), rgb(var(--detector-warm-rgb) / 0.72));
-          box-shadow: var(--detector-shadow);
-        }
-        .hero-card::after {
-          content: "";
-          position: absolute;
-          inset: auto -8% -42% 58%;
-          height: 11rem;
-          border: 1px solid rgb(var(--detector-accent-dark-rgb) / 0.18);
-          border-radius: 999px;
-          transform: rotate(-12deg);
+          background: rgb(var(--detector-panel-rgb) / 0.92);
+          box-shadow: var(--detector-shadow-md);
         }
         .eyebrow {
           margin: 0 0 var(--detector-space-sm);
-          color: var(--detector-accent-dark);
-          font-size: 0.78rem;
-          font-weight: 800;
-          letter-spacing: 0.14em;
+          color: var(--detector-accent-ink);
+          font-size: var(--detector-text-xs);
+          font-weight: var(--detector-weight-bold);
+          letter-spacing: var(--detector-tracking-wider);
           text-transform: uppercase;
         }
         .hero-card h1 {
-          max-width: 58rem;
+          max-width: var(--detector-max-width-hero);
           margin: 0;
           color: var(--detector-ink);
-          font-family: Georgia, 'Times New Roman', serif;
-          font-size: clamp(2.5rem, 6vw, 5.25rem);
-          line-height: 0.92;
-          letter-spacing: -0.055em;
+          font-family: var(--detector-font-display);
+          font-size: var(--detector-text-display);
+          line-height: var(--detector-leading-tight);
+          letter-spacing: var(--detector-tracking-tighter);
         }
         .lede {
-          max-width: 42rem;
+          max-width: var(--detector-max-width-copy);
           margin: var(--detector-space-md) 0 0;
           color: var(--detector-muted);
-          font-size: 1.08rem;
+          font-size: var(--detector-text-lg);
+          line-height: var(--detector-leading-body);
+        }
+        .section-heading, .flow-heading {
+          margin-bottom: var(--detector-space-md);
+        }
+        .section-heading--compact {
+          margin-top: var(--detector-space-sm);
+        }
+        .section-heading--results {
+          margin: var(--detector-space-xl) 0 var(--detector-space-md);
+        }
+        .section-heading h2, .flow-heading h2 {
+          margin: 0;
+          font-size: var(--detector-text-xl);
+          line-height: var(--detector-leading-tight);
+        }
+        .section-heading p:not(.eyebrow), .flow-heading p:not(.eyebrow) {
+          margin: var(--detector-space-xs) 0 0;
+          color: var(--detector-muted);
+          font-size: var(--detector-text-sm);
+          line-height: var(--detector-leading-body);
+        }
+        .empty-state, .result-summary {
+          border: var(--detector-border-width) solid var(--detector-line);
+          border-radius: var(--detector-radius-lg);
+          padding: var(--detector-space-xl);
+          background: rgb(var(--detector-panel-rgb) / 0.82);
+          box-shadow: var(--detector-shadow-sm);
+        }
+        .empty-state strong {
+          color: var(--detector-ink);
+          font-family: var(--detector-font-display);
+          font-size: var(--detector-text-xl);
+          letter-spacing: var(--detector-tracking-tight);
+        }
+        .empty-state p {
+          margin: var(--detector-space-xs) 0 0;
+          color: var(--detector-muted);
+          line-height: var(--detector-leading-body);
+        }
+        .empty-state--wide {
+          margin-top: 0;
+        }
+        .result-summary {
+          margin-bottom: var(--detector-space-lg);
+        }
+        .result-summary--ai {
+          background: linear-gradient(180deg, var(--detector-danger-soft), rgb(var(--detector-panel-rgb) / 0.86));
+        }
+        .result-summary--real {
+          background: linear-gradient(180deg, var(--detector-success-soft), rgb(var(--detector-panel-rgb) / 0.86));
+        }
+        .result-summary h2 {
+          margin: 0;
+          font-family: var(--detector-font-display);
+          font-size: var(--detector-text-result);
+          line-height: var(--detector-leading-tight);
+          letter-spacing: var(--detector-tracking-tighter);
+        }
+        .result-summary--ai h2 {
+          color: var(--detector-danger-ink);
+        }
+        .result-summary--real h2 {
+          color: var(--detector-success-ink);
+        }
+        .result-summary p:not(.eyebrow) {
+          margin: var(--detector-space-sm) 0 0;
+          color: var(--detector-muted);
+          font-size: var(--detector-text-md);
+        }
+        .metric-group-label {
+          margin: var(--detector-space-lg) 0 var(--detector-space-xs);
+          color: var(--detector-soft);
+          font-size: var(--detector-text-xs);
+          font-weight: var(--detector-weight-bold);
+          letter-spacing: var(--detector-tracking-wide);
+          text-transform: uppercase;
         }
         div[data-testid="stMetric"] {
-          border: 1px solid var(--detector-line);
-          border-radius: var(--detector-radius-lg);
+          border: var(--detector-border-width) solid var(--detector-line);
+          border-radius: var(--detector-radius-md);
           padding: var(--detector-space-md);
-          background: rgb(var(--detector-panel-rgb) / 0.72);
-          box-shadow: 0 14px 36px rgb(var(--detector-soil-rgb) / 0.08);
+          background: rgb(var(--detector-panel-rgb) / 0.78);
+          box-shadow: var(--detector-shadow-sm);
+        }
+        div[data-testid="stMetricLabel"] p {
+          color: var(--detector-muted);
+          font-size: var(--detector-text-xs);
+          letter-spacing: var(--detector-tracking-slight);
+        }
+        div[data-testid="stMetricValue"] {
+          color: var(--detector-ink);
+          font-family: var(--detector-font-display);
+          letter-spacing: var(--detector-tracking-tight);
         }
         div[data-testid="stFileUploader"] section {
-          border-color: var(--detector-line);
+          border-color: var(--detector-line-strong);
           border-radius: var(--detector-radius-md);
-          background: rgb(var(--detector-panel-rgb) / 0.66);
+          background: rgb(var(--detector-panel-rgb) / 0.72);
+        }
+        div[data-testid="stFileUploader"] small,
+        div[data-testid="stCaptionContainer"],
+        div[data-testid="stCaptionContainer"] * {
+          color: var(--detector-muted);
+        }
+        div[data-testid="stAlert"] {
+          border: var(--detector-border-width) solid var(--detector-line);
+          border-radius: var(--detector-radius-md);
+          background: var(--detector-warning-soft);
+          color: var(--detector-warning);
+        }
+        [data-testid="stSidebar"] {
+          background: var(--detector-panel);
+          border-right: var(--detector-border-width) solid var(--detector-line);
+        }
+        .sidebar-eyebrow {
+          margin: var(--detector-space-xs) 0 var(--detector-space-sm);
+          color: var(--detector-accent-ink);
+          font-size: var(--detector-text-xs);
+          font-weight: var(--detector-weight-bold);
+          letter-spacing: var(--detector-tracking-wider);
+          text-transform: uppercase;
         }
         .stButton > button {
-          border: 1px solid var(--detector-accent-dark);
+          border: var(--detector-border-width) solid var(--detector-accent-ink);
+          border-radius: var(--detector-radius-md);
           background: var(--detector-accent);
-          transition: transform 160ms ease, box-shadow 160ms ease;
-          box-shadow: 0 14px 30px rgb(var(--detector-accent-dark-rgb) / 0.18);
+          color: var(--detector-button-text);
+          font-weight: var(--detector-weight-bold);
+          transition: transform var(--detector-transition), box-shadow var(--detector-transition), background var(--detector-transition), border-color var(--detector-transition);
+          box-shadow: var(--detector-shadow-sm);
+        }
+        .stButton > button *, .stButton > button p {
+          color: var(--detector-button-text);
         }
         .stButton > button:hover {
-          transform: translateY(-1px);
-          box-shadow: 0 18px 38px rgb(var(--detector-accent-dark-rgb) / 0.24);
+          transform: translateY(var(--detector-lift));
+          border-color: var(--detector-accent-hover);
+          background: var(--detector-accent-hover);
+          box-shadow: var(--detector-shadow-md);
+        }
+        .stButton > button:focus-visible {
+          outline: var(--detector-border-width) solid var(--detector-focus);
+          outline-offset: var(--detector-space-2xs);
+        }
+        .stButton > button:disabled,
+        .stButton > button:disabled:hover,
+        .stButton > button[disabled] {
+          transform: none;
+          border-color: var(--detector-button-disabled-border);
+          background: var(--detector-button-disabled-bg);
+          color: var(--detector-button-disabled-text);
+          box-shadow: none;
+          cursor: not-allowed;
+          opacity: 1;
+        }
+        .stButton > button:disabled *,
+        .stButton > button:disabled p,
+        .stButton > button[disabled] *,
+        .stButton > button[disabled] p {
+          color: var(--detector-button-disabled-text);
+        }
+        hr {
+          border-color: var(--detector-line);
+        }
+        img {
+          border-radius: var(--detector-radius-md);
         }
         </style>
         """,

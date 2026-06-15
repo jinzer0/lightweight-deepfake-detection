@@ -54,7 +54,7 @@ def test_fusion_detector_warns_and_returns_none_for_missing_branch_checkpoint(
     _write_fusion_checkpoint(config, bias=-1.0)
     _write_mlp_checkpoint(config, "frequency_only", feature_type="frequency", input_dim=10, bias=0.5)
 
-    monkeypatch.setattr("src.inference.detector_service.load_clip_model", lambda _config, device: _FakeClipModel())
+    monkeypatch.setattr("src.inference.detector_service.load_clip_model_and_preprocess", lambda _config, device: (_FakeClipModel(), _fake_clip_preprocess))
 
     detector = DetectorService(config_path=config_path, model_name="fusion")
     with pytest.warns(RuntimeWarning, match="Optional branch checkpoint missing for clip_only"):
@@ -68,6 +68,26 @@ def test_fusion_detector_warns_and_returns_none_for_missing_branch_checkpoint(
     assert result["fusion_score"] == result["ai_prob"]
     assert Path(str(result["spectrum_path"])).is_file()
     assert Path(str(result["radial_spectrum_path"])).is_file()
+
+
+def test_clip_detector_uses_clip_preprocess_for_uploaded_image_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _write_config(tmp_path)
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    _write_mlp_checkpoint(config, "clip_only", feature_type="clip", input_dim=4, bias=0.25)
+    image_path = tmp_path / "upload.png"
+    Image.new("RGB", (333, 217), color=(30, 80, 130)).save(image_path)
+
+    fake_model = _FakeClipModel()
+    monkeypatch.setattr("src.inference.detector_service.load_clip_model_and_preprocess", lambda _config, device: (fake_model, _fake_clip_preprocess))
+
+    result = DetectorService(config_path=config_path, model_name="clip_only").predict(image_path)
+
+    assert result["ai_prob"] == pytest.approx(torch.sigmoid(torch.tensor(0.25)).item())
+    assert fake_model.seen_shape == (1, 3, 224, 224)
+
 
 
 def _write_config(tmp_path: Path) -> Path:
@@ -128,6 +148,9 @@ def _zero_model_with_bias(model: torch.nn.Module, bias: float) -> None:
 
 
 class _FakeClipModel:
+    def __init__(self) -> None:
+        self.seen_shape: tuple[int, ...] | None = None
+
     def to(self, _device: object) -> "_FakeClipModel":
         return self
 
@@ -135,7 +158,12 @@ class _FakeClipModel:
         return None
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
+        self.seen_shape = tuple(images.shape)
         return torch.ones((int(images.shape[0]), 4), dtype=torch.float32, device=images.device)
+
+
+def _fake_clip_preprocess(_image: Image.Image) -> torch.Tensor:
+    return torch.ones((3, 224, 224), dtype=torch.float32)
 
 
 def test_demo_detector_service_loads_current_frequency_checkpoint(tmp_path: Path) -> None:
