@@ -10,9 +10,14 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any, Iterable, TypeVar, cast
 
 from PIL import Image
+
+try:
+    from tqdm.auto import tqdm
+except ModuleNotFoundError:  # pragma: no cover - optional runtime nicety until requirements are installed
+    tqdm = None
 
 from _path import ensure_project_root_on_path
 
@@ -24,6 +29,7 @@ from src.data.validate_metadata import DATASET_COLUMNS, validate_metadata_rows, 
 
 DEFAULT_DATASET_ID = "TheKernel01/Tiny-GenImage"
 DEFAULT_IMAGE_SIZE = 512
+T = TypeVar("T")
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,11 +88,15 @@ def prepare_tiny_genimage(
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text("created by prepare_genimage_subset.py\n", encoding="utf-8")
             raise ValueError(f"created cleanup marker at {marker}; rerun --clean to delete generated jpg files")
-        for path in resolved_root.rglob("*.jpg"):
+        jpg_paths = list(resolved_root.rglob("*.jpg"))
+        for path in _progress(jpg_paths, desc="Cleaning existing JPGs", unit="file"):
             path.unlink()
     image_root.mkdir(parents=True, exist_ok=True)
     (image_root / ".genimage_subset_root").write_text("created by prepare_genimage_subset.py\n", encoding="utf-8")
     metadata_rows, manifest_rows = _materialize_rows(split_rows, image_root=image_root, image_size=image_size)
+    metadata_rows, manifest_rows, dropped_rows = _drop_cross_split_duplicate_hashes(metadata_rows, manifest_rows)
+    if dropped_rows:
+        _print_dropped_duplicates(dropped_rows)
     write_metadata(metadata_csv, metadata_rows)
     metadata_errors = validate_metadata_rows(metadata_rows, header=DATASET_COLUMNS, strict=False, check_files=True)
     if metadata_errors:
@@ -109,7 +119,8 @@ def _load_rows(dataset_id: str) -> list[dict[str, Any]]:
     generator_feature = features["generator"]
     label_feature = features["label"]
     for source_split, split_data in dataset.items():
-        for index, raw_item in enumerate(split_data):
+        total = len(split_data) if hasattr(split_data, "__len__") else None
+        for index, raw_item in enumerate(_progress(split_data, desc=f"Loading {source_split} rows", total=total, unit="row")):
             item = dict(cast(dict[str, Any], raw_item))
             label_id = int(item["label"])
             generator_id = int(item["generator"])
@@ -189,7 +200,7 @@ def _materialize_rows(rows: list[dict[str, Any]], *, image_root: Path, image_siz
     manifest_rows: list[dict[str, object]] = []
     counters: dict[tuple[str, str, str], int] = defaultdict(int)
     manifest_root = image_root.resolve()
-    for row in rows:
+    for row in _progress(rows, desc="Materializing images", total=len(rows), unit="image"):
         class_name = str(row["class_name"])
         generator = str(row["generator"])
         split = str(row["split"])
@@ -211,6 +222,72 @@ def _materialize_rows(rows: list[dict[str, Any]], *, image_root: Path, image_siz
         stat = output_path.stat()
         manifest_rows.append({"sample_id": image_id, "base_sample_id": image_id, "rel_path": rel_path.as_posix(), "root": manifest_root.as_posix(), "label": label, "class_name": class_name, "source": f"Tiny-GenImage:{generator}", "source_split": str(row["source_split"]), "split": split, "width": str(width), "height": str(height), "sha256": digest, "file_size": str(stat.st_size), "mtime": str(stat.st_mtime_ns), "status": OK_STATUS})
     return sorted(metadata_rows, key=lambda item: item["image_id"]), sorted(manifest_rows, key=lambda item: str(item["sample_id"]))
+
+
+def _drop_cross_split_duplicate_hashes(
+    metadata_rows: list[dict[str, str]],
+    manifest_rows: list[dict[str, object]],
+) -> tuple[list[dict[str, str]], list[dict[str, object]], list[dict[str, object]]]:
+    rows_by_digest: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for row in manifest_rows:
+        digest = str(row.get("sha256", ""))
+        if digest:
+            rows_by_digest[digest].append(row)
+
+    split_priority = {"train": 0, "val": 1, "test": 2}
+    dropped_rows: list[dict[str, object]] = []
+    dropped_sample_ids: set[str] = set()
+    for digest_rows in rows_by_digest.values():
+        if len({str(row.get("split", "")) for row in digest_rows}) <= 1:
+            continue
+        keep_row = min(
+            digest_rows,
+            key=lambda row: (
+                split_priority.get(str(row.get("split", "")), 99),
+                str(row.get("source_split", "")),
+                str(row.get("rel_path", "")),
+            ),
+        )
+        keep_sample_id = str(keep_row.get("sample_id", ""))
+        for row in digest_rows:
+            sample_id = str(row.get("sample_id", ""))
+            if sample_id != keep_sample_id:
+                dropped_rows.append(row)
+                dropped_sample_ids.add(sample_id)
+                _unlink_materialized_file(row)
+
+    if not dropped_rows:
+        return metadata_rows, manifest_rows, []
+
+    filtered_metadata_rows = [row for row in metadata_rows if row["image_id"] not in dropped_sample_ids]
+    filtered_manifest_rows = [row for row in manifest_rows if str(row.get("sample_id", "")) not in dropped_sample_ids]
+    return filtered_metadata_rows, filtered_manifest_rows, sorted(dropped_rows, key=lambda row: str(row.get("sample_id", "")))
+
+
+def _unlink_materialized_file(row: dict[str, object]) -> None:
+    root_text = str(row.get("root", ""))
+    rel_text = str(row.get("rel_path", ""))
+    if not root_text or not rel_text:
+        return
+    rel_path = Path(rel_text)
+    if rel_path.is_absolute():
+        return
+    (Path(root_text) / rel_path).unlink(missing_ok=True)
+
+
+def _print_dropped_duplicates(dropped_rows: list[dict[str, object]]) -> None:
+    print(f"dropped {len(dropped_rows)} duplicate materialized row(s) to prevent sha256 leakage across splits")
+    for row in dropped_rows[:10]:
+        digest_prefix = str(row.get("sha256", ""))[:12]
+        print(f"dropped duplicate: split={row.get('split')} sha256={digest_prefix} rel_path={row.get('rel_path')}")
+    if len(dropped_rows) > 10:
+        print(f"... {len(dropped_rows) - 10} more duplicate row(s) dropped")
+
+
+def _progress(iterable: Iterable[T], *, desc: str, unit: str, total: int | None = None) -> Iterable[T]:
+    if tqdm is None:
+        return iterable
+    return tqdm(iterable, desc=desc, total=total, unit=unit)
 
 
 def _sha256(path: Path) -> str:
