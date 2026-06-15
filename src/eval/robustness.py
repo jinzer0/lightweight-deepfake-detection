@@ -41,6 +41,24 @@ class RobustnessError(ValueError):
     pass
 
 
+def robustness_test_main() -> int:
+    from src.eval.robustness_runner import main
+
+    return main()
+
+
+def resolve_robustness_checkpoint_path(model_name: str, config: dict[str, Any], checkpoint_dir: Path) -> Path:
+    from src.eval.robustness_runner import resolve_checkpoint_path
+
+    return resolve_checkpoint_path(model_name, config, checkpoint_dir)
+
+
+def resolve_robustness_manifest_path(config: dict[str, Any], cli_manifest: str | None) -> Path:
+    from src.eval.robustness_runner import resolve_manifest_path
+
+    return resolve_manifest_path(config, cli_manifest)
+
+
 @dataclass(frozen=True)
 class CorruptionSpec:
     corruption: str
@@ -219,7 +237,7 @@ def _extract_corrupted_features(
 
 
 def _extract_frequency_features(config: Mapping[str, object], images: Sequence[Image.Image]) -> np.ndarray:
-    features = [extract_frequency_feature(image, config) for image in images]
+    features = [extract_frequency_feature(image, dict(config)) for image in images]
     if not features:
         raise RobustnessError("frequency robustness selected no images")
     array = np.stack(features, axis=0).astype(FEATURE_DTYPE, copy=False)
