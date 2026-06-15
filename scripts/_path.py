@@ -8,3 +8,7 @@ def ensure_project_root_on_path() -> None:
     project_root = str(PROJECT_ROOT)
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
+
+
+def bootstrap() -> None:
+    ensure_project_root_on_path()

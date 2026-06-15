@@ -30,8 +30,8 @@ def _write_rgb_image(path: Path, color: tuple[int, int, int], fmt: str) -> None:
 
 
 @pytest.fixture()
-def synthetic_cifake_root(tmp_path: Path) -> Path:
-    root = tmp_path / "cifake"
+def synthetic_real_fake_root(tmp_path: Path) -> Path:
+    root = tmp_path / "real_fake_images"
     for class_name, base_color in {"REAL": (35, 80, 125), "FAKE": (150, 70, 25)}.items():
         for index in range(6):
             fmt = "PNG" if index % 2 == 0 else "JPEG"

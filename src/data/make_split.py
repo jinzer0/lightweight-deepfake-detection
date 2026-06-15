@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 
-# pyright: reportAny=false, reportUnknownMemberType=false, reportUnknownVariableType=false, reportUnusedCallResult=false
 import csv
 import random
 from pathlib import Path
@@ -13,8 +12,8 @@ from .validate_metadata import DATASET_COLUMNS, PROJECT_SPLITS, validate_metadat
 def assign_splits(
     rows: list[dict[str, str]],
     seed: int = 42,
-    train_ratio: float = 0.70,
-    val_ratio: float = 0.15,
+    train_ratio: float = 0.80,
+    val_ratio: float = 0.10,
 ) -> list[dict[str, str]]:
     output_rows = [dict(row) for row in rows]
     randomizer = random.Random(seed)

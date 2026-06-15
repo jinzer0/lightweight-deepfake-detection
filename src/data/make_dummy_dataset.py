@@ -16,8 +16,8 @@ def make_dummy_dataset(
     num_fake: int,
     output_dir: str | Path,
     csv_path: str | Path,
-    width: int = 224,
-    height: int = 224,
+    width: int = 512,
+    height: int = 512,
     seed: int = 42,
 ) -> list[dict[str, str]]:
     root = Path(output_dir)
@@ -89,8 +89,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--num_fake", type=int, required=True, help="Number of fake dummy images")
     parser.add_argument("--output_dir", type=Path, required=True, help="Output root for dummy images")
     parser.add_argument("--csv", type=Path, required=True, help="Output dataset.csv path")
-    parser.add_argument("--width", type=int, default=224, help="Dummy image width")
-    parser.add_argument("--height", type=int, default=224, help="Dummy image height")
+    parser.add_argument("--width", type=int, default=512, help="Dummy image width")
+    parser.add_argument("--height", type=int, default=512, help="Dummy image height")
     parser.add_argument("--seed", type=int, default=42, help="Deterministic split seed")
     return parser.parse_args()
 

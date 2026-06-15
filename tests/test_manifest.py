@@ -6,13 +6,13 @@ from pathlib import Path
 
 import pytest
 
-from src.data.cifake import generate_manifest
+from src.data.local_manifest import generate_manifest
 from src.data.manifest import CLASS_TO_LABEL, MANIFEST_COLUMNS, ManifestValidationError, validate_manifest_rows, write_manifest, read_manifest
 
 
-def test_manifest_schema_label_polarity_and_deterministic_order(synthetic_cifake_root: Path, tmp_path: Path) -> None:
-    rows = generate_manifest(synthetic_cifake_root, seed=123)
-    repeated_rows = generate_manifest(synthetic_cifake_root, seed=123)
+def test_manifest_schema_label_polarity_and_deterministic_order(synthetic_real_fake_root: Path, tmp_path: Path) -> None:
+    rows = generate_manifest(synthetic_real_fake_root, seed=123)
+    repeated_rows = generate_manifest(synthetic_real_fake_root, seed=123)
     assert rows == repeated_rows
     assert list(rows[0].keys()) == MANIFEST_COLUMNS
     assert [row["rel_path"] for row in rows] == sorted(row["rel_path"] for row in rows)
@@ -28,8 +28,8 @@ def test_manifest_schema_label_polarity_and_deterministic_order(synthetic_cifake
     validate_manifest_rows(read_rows, strict=True)
 
 
-def test_manifest_rejects_duplicate_sample_and_split_leakage(synthetic_cifake_root: Path) -> None:
-    rows = [{key: str(value) for key, value in row.items()} for row in generate_manifest(synthetic_cifake_root, seed=9)]
+def test_manifest_rejects_duplicate_sample_and_split_leakage(synthetic_real_fake_root: Path) -> None:
+    rows = [{key: str(value) for key, value in row.items()} for row in generate_manifest(synthetic_real_fake_root, seed=9)]
     duplicate_id_rows = [dict(row) for row in rows]
     duplicate_id_rows[1]["sample_id"] = duplicate_id_rows[0]["sample_id"]
     with pytest.raises(ManifestValidationError, match="duplicate sample_id"):

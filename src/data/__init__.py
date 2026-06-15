@@ -1,4 +1,4 @@
-from .cifake import generate_and_write_manifest, generate_manifest, normalize_class_name
+from .local_manifest import generate_and_write_manifest, generate_manifest, normalize_class_name
 from .manifest import MANIFEST_COLUMNS, validate_manifest, validate_manifest_rows
 
 __all__ = [

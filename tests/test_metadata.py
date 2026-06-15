@@ -117,7 +117,7 @@ def test_metadata_rejects_missing_or_reordered_columns(tmp_path: Path) -> None:
 
 def test_make_split_supports_unsplit_csv_and_is_deterministic(tmp_path: Path) -> None:
     paths = []
-    for index in range(10):
+    for index in range(20):
         path = tmp_path / f"image_{index}.png"
         path.write_bytes(b"placeholder")
         paths.append(path)
@@ -128,7 +128,7 @@ def test_make_split_supports_unsplit_csv_and_is_deterministic(tmp_path: Path) ->
         writer = csv.DictWriter(file_obj, fieldnames=columns_without_split)
         writer.writeheader()
         for index, path in enumerate(paths):
-            class_name = "real" if index < 5 else "fake"
+            class_name = "real" if index < 10 else "fake"
             writer.writerow(
                 {
                     "image_id": f"sample_{index}",
@@ -149,7 +149,8 @@ def test_make_split_supports_unsplit_csv_and_is_deterministic(tmp_path: Path) ->
 
     assert split_rows == repeated_rows
     assert list(split_rows[0].keys()) == DATASET_COLUMNS
-    assert {row["split"] for row in split_rows} == {"train", "val", "test"}
+    split_counts = {split: sum(row["split"] == split for row in split_rows) for split in {"train", "val", "test"}}
+    assert split_counts == {"train": 16, "val": 2, "test": 2}
     validate_metadata_rows(split_rows, header=DATASET_COLUMNS, strict=True)
 
 
