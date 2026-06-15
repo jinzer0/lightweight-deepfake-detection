@@ -12,8 +12,8 @@ paths:
   figure_dir: artifacts/figures
 
 data:
-  image_size: 224
-  batch_size: 32
+  image_size: 512
+  batch_size: 16
   num_workers: 4
   label_map:
     real: 0
@@ -32,7 +32,7 @@ clip:
 
 frequency:
   method: dct
-  image_size: 224
+  image_size: 512
   grayscale: true
   radial_bins: 64
   log_scale: true

@@ -10,3 +10,4 @@ joblib
 matplotlib
 streamlit
 pytest
+datasets
