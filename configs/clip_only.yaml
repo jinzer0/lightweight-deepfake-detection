@@ -3,11 +3,12 @@ project:
   seed: 42
   device: cpu
 paths:
-  manifest_csv: data/metadata/genimage_manifest.csv
-  dataset_csv: data/metadata/genimage_manifest.csv
+  manifest_csv: outputs/genimage_tiny_full/manifest.csv
+  dataset_csv: outputs/genimage_tiny_full/manifest.csv
   feature_dir: artifacts/features
-  checkpoint_dir: artifacts/checkpoints/clip_only
-  report_dir: artifacts/reports
+  checkpoint_dir: artifacts/checkpoints
+  report_dir: outputs/metrics
+  scaler_dir: artifacts/scalers
 data:
   image_size: 512
   batch_size: 16

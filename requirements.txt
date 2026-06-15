@@ -11,3 +11,4 @@ matplotlib
 streamlit
 pytest
 datasets
+tqdm

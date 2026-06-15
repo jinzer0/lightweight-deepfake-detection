@@ -1,7 +1,7 @@
 # Repository Instructions
 
 ## Environment
-- Use the conda environment `ml_termproj` for all Python commands: `conda run -n ml_termproj ...` or activate it first.
+- Use the conda environment `ml_termproj` for all Python commands: `conda run --live-stream -n ml_termproj ...` or activate it first.
 - CUDA work is expected on this machine, but the CPU-safe smoke path should still run without CLIP downloads.
 - Current verified dependency install path is `pip install -r requirements.txt`; `datasets` is required for Tiny-GenImage prep.
 
@@ -22,7 +22,7 @@
 - Prefer `python -m src...` commands from the README for the current frequency/CLIP/fusion workflow.
 - For Tiny-GenImage full prep, use `scripts/prepare_genimage_subset.py`; default split is deterministic 70/20/10 over all rows.
 - For CUDA fine-tuning, validate the manifest first, then run `scripts/train_cuda_finetune.py`; checkpoint output is `best_checkpoint.pt`.
-- Run focused verification after changes, then `conda run -n ml_termproj python -m pytest -q` when practical.
+- Run focused verification after changes, then `conda run --live-stream -n ml_termproj python -m pytest -q` when practical.
 - Check `docs/plan/plan_0001.md` as historical context only; reconcile it with newer user pivots before treating it as authoritative.
 
 ## Don't
@@ -34,12 +34,12 @@
 - Do not commit data, model outputs, HF caches, or generated large artifacts unless explicitly requested.
 
 ## Useful Commands
-- Full tests: `conda run -n ml_termproj python -m pytest -q`
-- Metadata validation: `conda run -n ml_termproj python -m src.data.validate_metadata --csv data/metadata/dataset.csv`
-- CPU-safe smoke wrapper: `conda run -n ml_termproj python scripts/run_all_experiments.py`
-- Tiny-GenImage prep: `conda run -n ml_termproj python scripts/prepare_genimage_subset.py --clean`
-- Tiny-GenImage CUDA training: `conda run -n ml_termproj python scripts/train_cuda_finetune.py --manifest outputs/genimage_tiny_full/manifest.csv --output_dir outputs/genimage_tiny_full_finetune --device cuda --image_size 512 --model_arch resnet18 --epochs 6 --batch_size 64 --max_trials 4 --num_workers 8 --seed 42`
-- Streamlit demo: `conda run -n ml_termproj streamlit run src/app/app.py`
+- Full tests: `conda run --live-stream -n ml_termproj python -m pytest -q`
+- Metadata validation: `conda run --live-stream -n ml_termproj python -m src.data.validate_metadata --csv data/metadata/dataset.csv`
+- CPU-safe smoke wrapper: `conda run --live-stream -n ml_termproj python scripts/run_all_experiments.py`
+- Tiny-GenImage prep: `conda run --live-stream -n ml_termproj python scripts/prepare_genimage_subset.py --clean`
+- Tiny-GenImage CUDA training: `conda run --live-stream -n ml_termproj python scripts/train_cuda_finetune.py --manifest outputs/genimage_tiny_full/manifest.csv --output_dir outputs/genimage_tiny_full_finetune --device cuda --image_size 512 --model_arch resnet18 --epochs 6 --batch_size 64 --max_trials 4 --num_workers 8 --seed 42`
+- Streamlit demo: `conda run --live-stream -n ml_termproj streamlit run src/app/app.py`
 
 ## Commit Attribution
 - If the user asks for a commit, include this attribution in the commit message body:

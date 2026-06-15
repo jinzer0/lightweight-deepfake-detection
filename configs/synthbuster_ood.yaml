@@ -1,17 +1,18 @@
 project:
-  name: ai_gen_image_detector
+  name: ai_gen_image_detector_synthbuster_ood
   seed: 42
   device: cuda
 
 paths:
-  manifest_csv: outputs/genimage_tiny_full/manifest.csv
-  dataset_csv: data/metadata/genimage_tiny_full_dataset.csv
-  raw_data_dir: data/genimage_tiny_full_512
-  feature_dir: artifacts/features
+  manifest_csv: outputs/synthbuster_ood/manifest.csv
+  dataset_csv: data/metadata/synthbuster_ood_dataset.csv
+  raw_data_dir: data/synthbuster
+  feature_dir: artifacts/features_synthbuster_ood
   checkpoint_dir: artifacts/checkpoints
-  report_dir: outputs/metrics
-  figure_dir: outputs/plots
+  report_dir: outputs/metrics/synthbuster_ood
+  figure_dir: outputs/plots/synthbuster_ood
   scaler_dir: artifacts/scalers
+  frequency_scaler_path: artifacts/scalers/frequency_scaler.pkl
 
 data:
   image_size: 512
@@ -21,8 +22,6 @@ data:
     real: 0
     fake: 1
   splits:
-    train: train
-    val: val
     test: test
 
 clip:
@@ -42,10 +41,11 @@ frequency:
   radial_bins: 64
   log_scale: true
   normalize_feature: true
+  scaler: standard
 
 classifier:
   type: mlp
-  hidden_dim: 256
+  hidden_dim: 512
   dropout: 0.2
   num_classes: 1
 
@@ -54,6 +54,7 @@ train:
   learning_rate: 0.0001
   weight_decay: 0.0001
   early_stopping_patience: 5
+  gradient_clip: 1.0
   loss: bce_with_logits
 
 eval:
@@ -69,10 +70,5 @@ eval:
 
 robustness:
   jpeg_qualities: [95, 75, 50]
-  resize_scales: [0.5]
+  resize_scales: [0.5, 0.25]
   blur_sigmas: [1.0, 2.0]
-
-demo:
-  confidence:
-    high_margin: 0.25
-    medium_margin: 0.10

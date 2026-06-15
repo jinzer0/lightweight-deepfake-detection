@@ -41,3 +41,4 @@ outputs/**
 .playwright-mcp/
 .sisyphus/
 .omo/
+.omx/
