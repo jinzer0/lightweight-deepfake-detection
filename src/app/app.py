@@ -22,7 +22,7 @@ from src.inference.detector_service import DetectorService  # noqa: E402
 CONFIG_PATH = Path("configs/default.yaml")
 UPLOAD_TYPES = ("jpg", "jpeg", "png")
 UPLOAD_DIR = Path("artifacts/figures/uploads")
-LIMITATION_TEXT = "This result is a reference estimate from a limited dataset, not a guarantee that every AI-generated image can be detected."
+LIMITATION_TEXT = "Research demo · not forensic proof"
 MODEL_OPTIONS = ("frequency_only", "clip_only", "fusion")
 MODEL_LABELS = {
     "frequency_only": "Fast texture check",
@@ -30,9 +30,9 @@ MODEL_LABELS = {
     "fusion": "Balanced combined check",
 }
 MODEL_DESCRIPTIONS = {
-    "frequency_only": "A quick scan focused on image texture patterns.",
-    "clip_only": "A visual-language scan for broader image cues.",
-    "fusion": "A combined scan that weighs multiple detector signals.",
+    "frequency_only": "Best for a quick local demo. Uses radial frequency texture cues.",
+    "clip_only": "Uses broader visual cues. May need CLIP weights available locally.",
+    "fusion": "Combines visual and texture signals when all model files are installed.",
 }
 
 
@@ -46,44 +46,68 @@ class UploadedImage(Protocol):
 def main() -> None:
     st.set_page_config(page_title="AI-Generated Image Detector", page_icon="D", layout="wide")
     _apply_design_tokens()
+    _init_state()
 
+    _display_hero()
+
+    model_name, uploaded_file, analyze_clicked = _display_upload_panel()
+    _sync_upload_state(uploaded_file, str(model_name))
+
+    if analyze_clicked and uploaded_file is not None:
+        _run_prediction(uploaded_file, str(model_name))
+
+    _display_report_area(uploaded_file)
+
+
+def _init_state() -> None:
+    st.session_state.setdefault("last_upload_key", None)
+    st.session_state.setdefault("last_result", None)
+    st.session_state.setdefault("last_error", None)
+
+
+def _display_hero() -> None:
     st.markdown(
-        """
+        f"""
         <section class="hero-card">
-          <h1>AI-GEN Image Detection model</h1>
+          <p class="eyebrow">AI image detection demo</p>
+          <h1>AI-GEN Detector</h1>
+          <p class="lede">Upload one image and generate a reference detector report.</p>
+          <p class="limitation">{escape(LIMITATION_TEXT)}</p>
         </section>
         """,
         unsafe_allow_html=True,
     )
-    if LIMITATION_TEXT:
-        st.info(LIMITATION_TEXT)
 
+
+def _display_upload_panel() -> tuple[str, UploadedImage | None, bool]:
     with st.container(border=True):
-        st.markdown(
-            """
-            <section class="flow-heading">
-              <p class="eyebrow">Start here</p>
-              <h2>Upload and analyze in one step</h2>
-              <p>Keep the default option for the quickest review, or choose a broader check before analyzing.</p>
-            </section>
-            """,
-            unsafe_allow_html=True,
-        )
+        upload_column, preview_column = st.columns([0.42, 0.58], gap="large", vertical_alignment="center")
 
-        action_column, preview_column = st.columns([1, 1], gap="large")
-        with action_column:
+        with upload_column:
+            st.markdown(
+                """
+                <section class="panel-heading">
+                  <p class="eyebrow">Upload</p>
+                  <h2>Analyze one image</h2>
+                </section>
+                """,
+                unsafe_allow_html=True,
+            )
+            uploaded_file = st.file_uploader(
+                "Drag and drop an image here",
+                type=UPLOAD_TYPES,
+                accept_multiple_files=False,
+                help="JPG, JPEG, or PNG. Keep files small for a smooth demo.",
+                label_visibility="collapsed",
+            )
             model_name = st.selectbox(
-                "Review style",
+                "Model",
                 options=MODEL_OPTIONS,
                 index=0,
                 format_func=_model_label,
-                help="Choose the kind of review to run. Some options may take longer depending on this app's setup.",
+                help="Use Fast texture check for the quickest demo path.",
             )
             st.caption(MODEL_DESCRIPTIONS[str(model_name)])
-
-            uploaded_file = st.file_uploader("Choose an image", type=UPLOAD_TYPES, accept_multiple_files=False)
-            st.caption("Supported formats: JPG, JPEG, PNG.")
-
             analyze_clicked = st.button(
                 "Analyze image",
                 type="primary",
@@ -95,48 +119,61 @@ def main() -> None:
             if uploaded_file is None:
                 st.markdown(
                     """
-                    <section class="empty-state">
-                      <strong>No image selected yet</strong>
-                      <p>Upload one image to preview it here, then run the analysis from the button beside it.</p>
+                    <section class="preview-empty">
+                      <strong>Preview</strong>
+                      <p>Your selected image will appear here before analysis.</p>
                     </section>
                     """,
                     unsafe_allow_html=True,
                 )
             else:
-                st.image(uploaded_file, caption="Selected image", width="stretch")
+                st.image(uploaded_file, caption="Preview", width="stretch")
+
+    return str(model_name), uploaded_file, bool(analyze_clicked)
+
+
+def _sync_upload_state(uploaded_file: UploadedImage | None, model_name: str) -> None:
+    if uploaded_file is None:
+        current_key = None
+    else:
+        payload = uploaded_file.getvalue()
+        current_key = f"{uploaded_file.name}:{len(payload)}:{model_name}"
+    if current_key != st.session_state.get("last_upload_key"):
+        st.session_state["last_upload_key"] = current_key
+        st.session_state["last_result"] = None
+        st.session_state["last_error"] = None
+
+
+def _display_report_area(uploaded_file: UploadedImage | None) -> None:
+    result = st.session_state.get("last_result")
+    error = st.session_state.get("last_error")
+
+    if error:
+        st.error(str(error))
+        return
+    if result is not None:
+        _display_scores(result)
+        _display_visualizations(result)
+        return
 
     st.markdown(
         """
-        <section class="section-heading section-heading--results">
-          <p class="eyebrow">Results</p>
-          <h2>Your image report</h2>
+        <section class="report-empty">
+          <p class="eyebrow">Report</p>
+          <h2>Waiting for an image</h2>
+          <p>Upload one JPG or PNG, choose a model, then run analysis.</p>
+        </section>
+        """
+        if uploaded_file is None
+        else """
+        <section class="report-empty report-empty--ready">
+          <p class="eyebrow">Report</p>
+          <h2>Image loaded</h2>
+          <p>Click <strong>Analyze image</strong> to generate the report.</p>
         </section>
         """,
         unsafe_allow_html=True,
     )
-    if uploaded_file is None:
-        st.markdown(
-            """
-            <section class="empty-state empty-state--wide">
-              <strong>Waiting for an image</strong>
-              <p>Your result will appear here after you choose an image and start the analysis.</p>
-            </section>
-            """,
-            unsafe_allow_html=True,
-        )
-        return
-    if analyze_clicked:
-        _run_prediction(uploaded_file, str(model_name))
-    else:
-        st.markdown(
-            """
-            <section class="empty-state empty-state--wide">
-              <strong>Ready when you are</strong>
-              <p>Use the analyze button above to generate the image report.</p>
-            </section>
-            """,
-            unsafe_allow_html=True,
-        )
 
 
 def _model_label(model_name: str) -> str:
@@ -144,16 +181,18 @@ def _model_label(model_name: str) -> str:
 
 
 def _run_prediction(uploaded_file: UploadedImage, model_name: str) -> None:
+    st.session_state["last_result"] = None
+    st.session_state["last_error"] = None
     try:
-        image_path = _save_upload(uploaded_file)
-        service = DetectorService(CONFIG_PATH, model_name=model_name)
-        result = service.predict(image_path)
+        with st.spinner("Analyzing image…"):
+            image_path = _save_upload(uploaded_file)
+            service = DetectorService(CONFIG_PATH, model_name=model_name)
+            result = service.predict(image_path)
     except Exception as exc:  # noqa: BLE001
-        st.error(_actionable_error(exc, model_name))
+        st.session_state["last_error"] = _actionable_error(exc, model_name)
         return
 
-    _display_scores(result)
-    _display_visualizations(result)
+    st.session_state["last_result"] = result
 
 
 def _save_upload(uploaded_file: UploadedImage) -> Path:
@@ -204,15 +243,14 @@ def _display_scores(result: dict[str, float | str | None]) -> None:
 
     st.markdown('<p class="metric-group-label">Supporting signals</p>', unsafe_allow_html=True)
     branch_columns = st.columns(3)
-    branch_columns[0].metric("Visual similarity signal", _format_optional_score(result["clip_score"]))
-    branch_columns[1].metric("Texture signal", _format_optional_score(result["frequency_score"]))
+    branch_columns[0].metric("Texture signal", _format_optional_score(result["frequency_score"]))
+    branch_columns[1].metric("Visual signal", _format_optional_score(result["clip_score"]))
     branch_columns[2].metric("Combined signal", _format_optional_score(result["fusion_score"]))
 
 
 def _display_visualizations(result: dict[str, float | str | None]) -> None:
     spectrum_path = result["spectrum_path"]
     radial_path = result["radial_spectrum_path"]
-    st.divider()
     st.markdown(
         """
         <section class="section-heading section-heading--compact">
@@ -225,7 +263,7 @@ def _display_visualizations(result: dict[str, float | str | None]) -> None:
     )
     viz_columns = st.columns(2, gap="large")
     with viz_columns[0]:
-        st.subheader("DCT/FFT spectrum")
+        st.subheader("Spectrum")
         _display_image_path(spectrum_path)
     with viz_columns[1]:
         st.subheader("Radial spectrum")
@@ -234,25 +272,25 @@ def _display_visualizations(result: dict[str, float | str | None]) -> None:
 
 def _display_image_path(path_value: float | str | None) -> None:
     if not isinstance(path_value, str) or not path_value:
-        st.info("This view is not available for the selected review.")
+        st.info("This view is not available for the selected model.")
         return
     image_path = Path(path_value)
     if not image_path.is_absolute():
         image_path = PROJECT_ROOT / image_path
     if not image_path.is_file():
-        st.info("This view is not available for the selected review.")
+        st.info("This view is not available for the selected model.")
         return
     st.image(image_path.as_posix(), width="stretch")
 
 
 def _format_optional_score(value: float | str | None) -> str:
     if value is None:
-        return "Not available"
+        return "—"
     return _format_score(_as_float(value))
 
 
 def _format_score(value: float) -> str:
-    return f"{value:.4f}"
+    return f"{value:.2f}"
 
 
 def _as_float(value: float | str | None) -> float:
@@ -283,285 +321,201 @@ def _apply_design_tokens() -> None:
         """
         <style>
         :root {
+          --detector-bg: #f7f5f0;
+          --detector-surface: #fffdf8;
+          --detector-surface-muted: #f1eee6;
           --detector-ink: #20201d;
-          --detector-muted: #514d46;
-          --detector-soft: #5f5a52;
-          --detector-paper: #f7f5f0;
-          --detector-paper-alt: #efede6;
-          --detector-panel: #fffdf8;
-          --detector-panel-muted: #f3f0e8;
+          --detector-muted: #5c574f;
           --detector-line: #ded8cc;
-          --detector-line-strong: #c8c0b2;
           --detector-accent: #344a40;
-          --detector-accent-hover: #24352d;
-          --detector-accent-soft: #dce6df;
-          --detector-accent-ink: #1f332a;
-          --detector-focus: #0f5132;
+          --detector-accent-ink: #21332b;
+          --detector-button-bg: #2f463b;
           --detector-button-text: #fffaf0;
-          --detector-button-disabled-bg: #d8d1c4;
-          --detector-button-disabled-text: #514d46;
-          --detector-button-disabled-border: #b8ae9f;
-          --detector-warning: #5f4711;
-          --detector-warning-soft: #f4ead4;
+          --detector-button-disabled-bg: #ebe6dc;
+          --detector-button-disabled-text: #5c574f;
+          --detector-danger: #7a3c2f;
           --detector-danger-soft: #f1ded8;
-          --detector-danger-ink: #7a3c2f;
+          --detector-success: #35543b;
           --detector-success-soft: #dfe9df;
-          --detector-success-ink: #35543b;
-          --detector-ink-rgb: 32 32 29;
-          --detector-panel-rgb: 255 253 248;
-          --detector-accent-rgb: 52 74 64;
-          --detector-border-width: 1px;
-          --detector-shadow-sm: 0 0.5rem 1.5rem rgb(var(--detector-ink-rgb) / 0.05);
-          --detector-shadow-md: 0 1rem 2.75rem rgb(var(--detector-ink-rgb) / 0.08);
-          --detector-space-2xs: 0.25rem;
-          --detector-space-xs: 0.5rem;
-          --detector-space-sm: 0.75rem;
-          --detector-space-md: 1rem;
-          --detector-space-lg: 1.5rem;
-          --detector-space-xl: 2rem;
-          --detector-space-2xl: 3rem;
-          --detector-radius-sm: 0.625rem;
-          --detector-radius-md: 0.875rem;
-          --detector-radius-lg: 1.25rem;
-          --detector-radius-pill: 999px;
-          --detector-font-body: 'Aptos', 'IBM Plex Sans', 'Segoe UI', sans-serif;
-          --detector-font-display: 'Iowan Old Style', 'Charter', Georgia, serif;
-          --detector-text-xs: 0.78rem;
-          --detector-text-sm: 0.92rem;
-          --detector-text-md: 1rem;
-          --detector-text-lg: 1.08rem;
-          --detector-text-xl: 1.35rem;
-          --detector-text-display: clamp(2.4rem, 5vw, 4.6rem);
-          --detector-text-result: clamp(2rem, 4vw, 3.4rem);
-          --detector-leading-tight: 0.98;
-          --detector-leading-body: 1.65;
-          --detector-tracking-tight: -0.03em;
-          --detector-tracking-tighter: -0.045em;
-          --detector-tracking-slight: 0.02em;
-          --detector-tracking-wide: 0.1em;
-          --detector-tracking-wider: 0.12em;
-          --detector-weight-bold: 700;
-          --detector-lift: -0.0625rem;
-          --detector-transition: 160ms ease;
-          --detector-max-width: 76rem;
-          --detector-max-width-hero: 54rem;
-          --detector-max-width-copy: 44rem;
+          --detector-radius: 1rem;
+          --detector-font: Aptos, IBM Plex Sans, Segoe UI, sans-serif;
+          --detector-display: Iowan Old Style, Charter, Georgia, serif;
         }
         .stApp {
           color: var(--detector-ink);
-          background: linear-gradient(180deg, var(--detector-paper), var(--detector-paper-alt));
-          font-family: var(--detector-font-body);
+          background: var(--detector-bg);
+          font-family: var(--detector-font);
         }
         .block-container {
-          max-width: var(--detector-max-width);
-          padding-top: var(--detector-space-2xl);
-          padding-bottom: var(--detector-space-2xl);
+          max-width: 76rem;
+          padding-top: 2rem;
+          padding-bottom: 3rem;
         }
-        h1, h2, h3, [data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2, [data-testid="stSidebar"] h3 {
-          color: var(--detector-ink);
-          font-family: var(--detector-font-display);
-          letter-spacing: var(--detector-tracking-tight);
+        h1, h2, h3, p, label, span, div[data-testid="stMarkdownContainer"] {
+          font-family: var(--detector-font);
         }
-        p, label, span, div[data-testid="stMarkdownContainer"] {
-          font-family: var(--detector-font-body);
+        .hero-card,
+        .report-empty,
+        .result-summary,
+        div[data-testid="stMetric"],
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+          border: 1px solid var(--detector-line);
+          border-radius: var(--detector-radius);
+          background: var(--detector-surface);
         }
         .hero-card {
-          border: var(--detector-border-width) solid var(--detector-line);
-          border-radius: var(--detector-radius-lg);
-          padding: var(--detector-space-2xl);
-          margin-bottom: var(--detector-space-lg);
-          background: rgb(var(--detector-panel-rgb) / 0.92);
-          box-shadow: var(--detector-shadow-md);
-        }
-        .eyebrow {
-          margin: 0 0 var(--detector-space-sm);
-          color: var(--detector-accent-ink);
-          font-size: var(--detector-text-xs);
-          font-weight: var(--detector-weight-bold);
-          letter-spacing: var(--detector-tracking-wider);
-          text-transform: uppercase;
+          margin-bottom: 1.25rem;
+          padding: 2rem;
         }
         .hero-card h1 {
-          max-width: var(--detector-max-width-hero);
-          margin: 0;
+          margin: 0.2rem 0 0;
           color: var(--detector-ink);
-          font-family: var(--detector-font-display);
-          font-size: var(--detector-text-display);
-          line-height: var(--detector-leading-tight);
-          letter-spacing: var(--detector-tracking-tighter);
+          font-family: var(--detector-display);
+          font-size: clamp(2.4rem, 5vw, 4.2rem);
+          line-height: 0.98;
+          letter-spacing: -0.045em;
+        }
+        .eyebrow, .metric-group-label {
+          margin: 0;
+          color: var(--detector-accent-ink);
+          font-size: 0.78rem;
+          font-weight: 750;
+          letter-spacing: 0.1em;
+          text-transform: uppercase;
         }
         .lede {
-          max-width: var(--detector-max-width-copy);
-          margin: var(--detector-space-md) 0 0;
+          max-width: 42rem;
+          margin: 0.75rem 0 0;
           color: var(--detector-muted);
-          font-size: var(--detector-text-lg);
-          line-height: var(--detector-leading-body);
+          font-size: 1.06rem;
+          line-height: 1.6;
         }
-        .section-heading, .flow-heading {
-          margin-bottom: var(--detector-space-md);
-        }
-        .section-heading--compact {
-          margin-top: var(--detector-space-sm);
-        }
-        .section-heading--results {
-          margin: var(--detector-space-xl) 0 var(--detector-space-md);
-        }
-        .section-heading h2, .flow-heading h2 {
-          margin: 0;
-          font-size: var(--detector-text-xl);
-          line-height: var(--detector-leading-tight);
-        }
-        .section-heading p:not(.eyebrow), .flow-heading p:not(.eyebrow) {
-          margin: var(--detector-space-xs) 0 0;
+        .limitation {
+          margin: 0.75rem 0 0;
           color: var(--detector-muted);
-          font-size: var(--detector-text-sm);
-          line-height: var(--detector-leading-body);
+          font-size: 0.92rem;
+          font-weight: 650;
         }
-        .empty-state, .result-summary {
-          border: var(--detector-border-width) solid var(--detector-line);
-          border-radius: var(--detector-radius-lg);
-          padding: var(--detector-space-xl);
-          background: rgb(var(--detector-panel-rgb) / 0.82);
-          box-shadow: var(--detector-shadow-sm);
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+          padding: 0.5rem;
         }
-        .empty-state strong {
+        .panel-heading {
+          margin-bottom: 1rem;
+        }
+        .panel-heading h2,
+        .report-empty h2,
+        .section-heading h2 {
+          margin: 0.2rem 0 0;
           color: var(--detector-ink);
-          font-family: var(--detector-font-display);
-          font-size: var(--detector-text-xl);
-          letter-spacing: var(--detector-tracking-tight);
+          font-size: 1.35rem;
+          letter-spacing: -0.025em;
         }
-        .empty-state p {
-          margin: var(--detector-space-xs) 0 0;
+        .preview-empty {
+          display: grid;
+          min-height: 19rem;
+          place-items: center;
+          border: 1px dashed var(--detector-line);
+          border-radius: var(--detector-radius);
+          background: var(--detector-surface-muted);
           color: var(--detector-muted);
-          line-height: var(--detector-leading-body);
+          text-align: center;
         }
-        .empty-state--wide {
-          margin-top: 0;
+        .preview-empty strong {
+          display: block;
+          color: var(--detector-ink);
+          font-size: 1.08rem;
         }
-        .result-summary {
-          margin-bottom: var(--detector-space-lg);
+        .preview-empty p,
+        .report-empty p:not(.eyebrow),
+        .section-heading p:not(.eyebrow) {
+          margin: 0.5rem 0 0;
+          color: var(--detector-muted);
+          line-height: 1.55;
+        }
+        .report-empty, .result-summary {
+          margin-top: 1rem;
+          padding: 1.4rem 1.5rem;
+        }
+        .report-empty--ready {
+          background: #fbfaf6;
         }
         .result-summary--ai {
-          background: linear-gradient(180deg, var(--detector-danger-soft), rgb(var(--detector-panel-rgb) / 0.86));
+          background: var(--detector-danger-soft);
         }
         .result-summary--real {
-          background: linear-gradient(180deg, var(--detector-success-soft), rgb(var(--detector-panel-rgb) / 0.86));
+          background: var(--detector-success-soft);
         }
         .result-summary h2 {
-          margin: 0;
-          font-family: var(--detector-font-display);
-          font-size: var(--detector-text-result);
-          line-height: var(--detector-leading-tight);
-          letter-spacing: var(--detector-tracking-tighter);
+          margin: 0.15rem 0 0;
+          color: var(--detector-ink);
+          font-family: var(--detector-display);
+          font-size: clamp(2rem, 4vw, 3rem);
+          letter-spacing: -0.04em;
         }
-        .result-summary--ai h2 {
-          color: var(--detector-danger-ink);
-        }
-        .result-summary--real h2 {
-          color: var(--detector-success-ink);
-        }
-        .result-summary p:not(.eyebrow) {
-          margin: var(--detector-space-sm) 0 0;
-          color: var(--detector-muted);
-          font-size: var(--detector-text-md);
-        }
+        .result-summary--ai h2 { color: var(--detector-danger); }
+        .result-summary--real h2 { color: var(--detector-success); }
         .metric-group-label {
-          margin: var(--detector-space-lg) 0 var(--detector-space-xs);
-          color: var(--detector-soft);
-          font-size: var(--detector-text-xs);
-          font-weight: var(--detector-weight-bold);
-          letter-spacing: var(--detector-tracking-wide);
-          text-transform: uppercase;
+          margin: 1.25rem 0 0.5rem;
         }
         div[data-testid="stMetric"] {
-          border: var(--detector-border-width) solid var(--detector-line);
-          border-radius: var(--detector-radius-md);
-          padding: var(--detector-space-md);
-          background: rgb(var(--detector-panel-rgb) / 0.78);
-          box-shadow: var(--detector-shadow-sm);
+          padding: 0.9rem 1rem;
         }
-        div[data-testid="stMetricLabel"] p {
-          color: var(--detector-muted);
-          font-size: var(--detector-text-xs);
-          letter-spacing: var(--detector-tracking-slight);
-        }
-        div[data-testid="stMetricValue"] {
-          color: var(--detector-ink);
-          font-family: var(--detector-font-display);
-          letter-spacing: var(--detector-tracking-tight);
-        }
-        div[data-testid="stFileUploader"] section {
-          border-color: var(--detector-line-strong);
-          border-radius: var(--detector-radius-md);
-          background: rgb(var(--detector-panel-rgb) / 0.72);
-        }
-        div[data-testid="stFileUploader"] small,
+        div[data-testid="stMetricLabel"] p,
         div[data-testid="stCaptionContainer"],
-        div[data-testid="stCaptionContainer"] * {
-          color: var(--detector-muted);
-        }
-        div[data-testid="stAlert"] {
-          border: var(--detector-border-width) solid var(--detector-line);
-          border-radius: var(--detector-radius-md);
-          background: var(--detector-warning-soft);
-          color: var(--detector-warning);
-        }
-        [data-testid="stSidebar"] {
-          background: var(--detector-panel);
-          border-right: var(--detector-border-width) solid var(--detector-line);
-        }
-        .sidebar-eyebrow {
-          margin: var(--detector-space-xs) 0 var(--detector-space-sm);
-          color: var(--detector-accent-ink);
-          font-size: var(--detector-text-xs);
-          font-weight: var(--detector-weight-bold);
-          letter-spacing: var(--detector-tracking-wider);
-          text-transform: uppercase;
+        div[data-testid="stCaptionContainer"] *,
+        small {
+          color: var(--detector-muted) !important;
         }
         .stButton > button {
-          border: var(--detector-border-width) solid var(--detector-accent-ink);
-          border-radius: var(--detector-radius-md);
-          background: var(--detector-accent);
-          color: var(--detector-button-text);
-          font-weight: var(--detector-weight-bold);
-          transition: transform var(--detector-transition), box-shadow var(--detector-transition), background var(--detector-transition), border-color var(--detector-transition);
-          box-shadow: var(--detector-shadow-sm);
+          border: 1px solid var(--detector-button-bg);
+          border-radius: 0.75rem;
+          background: var(--detector-button-bg);
+          color: var(--detector-button-text) !important;
+          font-weight: 750;
         }
         .stButton > button *, .stButton > button p {
-          color: var(--detector-button-text);
-        }
-        .stButton > button:hover {
-          transform: translateY(var(--detector-lift));
-          border-color: var(--detector-accent-hover);
-          background: var(--detector-accent-hover);
-          box-shadow: var(--detector-shadow-md);
-        }
-        .stButton > button:focus-visible {
-          outline: var(--detector-border-width) solid var(--detector-focus);
-          outline-offset: var(--detector-space-2xs);
+          color: var(--detector-button-text) !important;
+          font-weight: 750;
         }
         .stButton > button:disabled,
-        .stButton > button:disabled:hover,
         .stButton > button[disabled] {
-          transform: none;
-          border-color: var(--detector-button-disabled-border);
+          border-color: var(--detector-line);
           background: var(--detector-button-disabled-bg);
-          color: var(--detector-button-disabled-text);
-          box-shadow: none;
-          cursor: not-allowed;
+          color: var(--detector-button-disabled-text) !important;
           opacity: 1;
         }
         .stButton > button:disabled *,
         .stButton > button:disabled p,
-        .stButton > button[disabled] *,
-        .stButton > button[disabled] p {
-          color: var(--detector-button-disabled-text);
+        .stButton > button[disabled] p,
+        .stButton > button[disabled] * {
+          color: var(--detector-button-disabled-text) !important;
         }
-        hr {
+        div[data-testid="stFileUploader"] button {
           border-color: var(--detector-line);
+          background: var(--detector-surface-muted);
+          color: var(--detector-ink) !important;
         }
-        img {
-          border-radius: var(--detector-radius-md);
+        div[data-testid="stFileUploader"] button *,
+        div[data-testid="stFileUploader"] button p {
+          color: var(--detector-ink) !important;
+        }
+        div[data-testid="stFileUploader"] section,
+        div[data-baseweb="select"] > div {
+          border-color: var(--detector-line);
+          background: var(--detector-surface);
+        }
+        div[data-testid="stImage"] img {
+          border: 1px solid var(--detector-line);
+          border-radius: 0.875rem;
+        }
+        div[data-testid="stAlert"] {
+          border: 1px solid var(--detector-line);
+          border-radius: 0.875rem;
+        }
+        @media (max-width: 920px) {
+          .preview-empty {
+            min-height: 14rem;
+          }
         }
         </style>
         """,
